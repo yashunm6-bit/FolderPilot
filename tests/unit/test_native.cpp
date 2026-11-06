@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "native.hpp"
+#include "text.hpp"
 
 using namespace folderpilot::platform;
 
@@ -161,6 +162,79 @@ TEST_CASE("directory buffer parser accepts an empty batch") {
     const auto parsed = parse_id_both_dir_entries(nullptr, 0);
     CHECK(parsed.status == DirParseStatus::Ok);
     CHECK(parsed.entries.empty());
+}
+
+TEST_CASE("directory buffer parser preserves dot and dot-dot entries verbatim") {
+    // Some filesystems surface "." and ".." through enumeration; the parser
+    // must hand them through unchanged so the scanner can skip them.
+    const auto dot = build_entry(L".", 0);
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(dot.data()), dot.size());
+    REQUIRE(parsed.status == DirParseStatus::Ok);
+    REQUIRE(parsed.entries.size() == 1);
+    CHECK(parsed.entries[0].name == L".");
+
+    const auto dotdot = build_entry(L"..", 0);
+    const auto parsed2 = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(dotdot.data()), dotdot.size());
+    REQUIRE(parsed2.status == DirParseStatus::Ok);
+    REQUIRE(parsed2.entries.size() == 1);
+    CHECK(parsed2.entries[0].name == L"..");
+}
+
+TEST_CASE("directory buffer parser keeps duplicate names (no deduplication)") {
+    // Two entries with the SAME name must both survive - deduplication by
+    // filename is explicitly forbidden.
+    const auto first = build_entry(L"same.txt", 0);
+    const auto second = build_entry(L"same.txt", 0);
+    const unsigned long stride = static_cast<unsigned long>(align8(first.size()));
+
+    std::vector<std::byte> buffer(stride + second.size());
+    std::memcpy(buffer.data(), first.data(), first.size());
+    std::memcpy(buffer.data() + stride, second.data(), second.size());
+    *reinterpret_cast<unsigned long*>(buffer.data()) = stride;
+
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+    REQUIRE(parsed.status == DirParseStatus::Ok);
+    REQUIRE(parsed.entries.size() == 2);
+    CHECK(parsed.entries[0].name == L"same.txt");
+    CHECK(parsed.entries[1].name == L"same.txt");
+}
+
+TEST_CASE("directory buffer parser accepts a name ending exactly at the buffer edge") {
+    // The name region may legitimately end at the last valid byte; the
+    // bounds check must be inclusive.
+    constexpr std::size_t kHeader = offsetof(FILE_ID_BOTH_DIR_INFO, FileName);
+    const std::size_t name_bytes = 8; // L"edge" (4 chars)
+    std::vector<std::byte> buffer(kHeader + name_bytes);
+
+    FILE_ID_BOTH_DIR_INFO info{};
+    info.NextEntryOffset = 0;
+    info.FileNameLength = static_cast<unsigned long>(name_bytes);
+    std::memcpy(buffer.data(), &info, kHeader);
+    std::memcpy(buffer.data() + kHeader, L"edge", name_bytes);
+
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+    REQUIRE(parsed.status == DirParseStatus::Ok);
+    REQUIRE(parsed.entries.size() == 1);
+    CHECK(parsed.entries[0].name == L"edge");
+}
+
+TEST_CASE("invalid UTF-16 in an entry name fails the strict conversion") {
+    // The OS never hands out invalid UTF-16 names, but the conversion the
+    // scanner relies on must still be proven to reject one rather than
+    // repair it. A lone surrogate is the canonical invalid case.
+    const auto entry = build_entry(std::wstring{L'a', L'\xD800', L'b'}, 0);
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(entry.data()), entry.size());
+    REQUIRE(parsed.status == DirParseStatus::Ok);
+    REQUIRE(parsed.entries.size() == 1);
+
+    const auto converted = to_utf8(parsed.entries[0].name);
+    CHECK_FALSE(converted.ok);
+    CHECK(!converted.error.empty());
 }
 
 TEST_CASE("directory buffer parser rejects malformed entries") {
