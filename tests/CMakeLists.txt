@@ -10,6 +10,7 @@ add_executable(folderpilot_tests
     unit/test_classifier.cpp
     unit/test_text.cpp
     unit/test_native.cpp
+    unit/test_handle.cpp
     unit/test_path_guard.cpp
     unit/test_scanner.cpp
 )

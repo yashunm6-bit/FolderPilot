@@ -52,6 +52,11 @@ struct NativeResult {
     unsigned long native_code = 0; // NTSTATUS or Win32 error code, for reports
 };
 
+// Maps an NTSTATUS code onto the structured failure taxonomy (Engineering
+// Plan v2.2). Unknown or unhandled codes map to NativeFailure::Other - they
+// are never silently swallowed. Exposed for direct unit testing.
+NativeFailure classify_ntstatus(long nt_status);
+
 // ---------------------------------------------------------------------------
 // Attributes, identity, volume identity.
 // ---------------------------------------------------------------------------

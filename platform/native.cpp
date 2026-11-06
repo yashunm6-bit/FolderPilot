@@ -86,6 +86,8 @@ bool is_ascii_alpha(wchar_t c) {
     return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z');
 }
 
+} // namespace
+
 NativeFailure classify_ntstatus(LONG status) {
     if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND) {
         return NativeFailure::ConfirmedNotFound;
@@ -110,6 +112,8 @@ NativeFailure classify_ntstatus(LONG status) {
     }
     return NativeFailure::Other;
 }
+
+namespace {
 
 // Handle queries used by the bootstrap and by source inspection.
 NativeResult query_attribute_tag_info(HANDLE handle, EntryAttributes& out) {
