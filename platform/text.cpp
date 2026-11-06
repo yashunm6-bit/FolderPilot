@@ -16,17 +16,11 @@
 #endif
 #include <Windows.h>
 
-#include <limits>
 #include <utility>
 
 namespace folderpilot::platform {
 
 namespace {
-
-// The Win32 conversion APIs take int lengths. Guard the size_t -> int
-// narrowing explicitly instead of letting it wrap silently.
-constexpr std::size_t kMaxLength =
-    static_cast<std::size_t>((std::numeric_limits<int>::max)());
 
 std::string api_error(const char* apiName) {
     return std::string(apiName) + " failed (Windows error " +
@@ -35,14 +29,23 @@ std::string api_error(const char* apiName) {
 
 } // namespace
 
+std::optional<int> to_win32_length(const std::size_t size) {
+    if (size > kMaxConversionLength) {
+        return std::nullopt;
+    }
+    // Safe narrowing: size is known to fit in an int here.
+    return static_cast<int>(size);
+}
+
 Utf16ConversionResult to_utf16(std::string_view utf8) {
     if (utf8.empty()) {
         return {true, {}, {}};
     }
-    if (utf8.size() > kMaxLength) {
+    const std::optional<int> api_length = to_win32_length(utf8.size());
+    if (!api_length.has_value()) {
         return {false, {}, "UTF-8 input too long for conversion (exceeds INT_MAX code units)"};
     }
-    const int length = static_cast<int>(utf8.size());
+    const int length = *api_length;
 
     const int required = ::MultiByteToWideChar(
         CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), length, nullptr, 0);
@@ -67,10 +70,11 @@ Utf8ConversionResult to_utf8(std::wstring_view utf16) {
     if (utf16.empty()) {
         return {true, {}, {}};
     }
-    if (utf16.size() > kMaxLength) {
+    const std::optional<int> api_length = to_win32_length(utf16.size());
+    if (!api_length.has_value()) {
         return {false, {}, "UTF-16 input too long for conversion (exceeds INT_MAX code units)"};
     }
-    const int length = static_cast<int>(utf16.size());
+    const int length = *api_length;
 
     // For CP_UTF8 the default-char out-parameter must be null; strictness
     // comes from WC_ERR_INVALID_CHARS alone. As above: explicit length means

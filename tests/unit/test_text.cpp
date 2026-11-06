@@ -3,6 +3,7 @@
 
 #include <doctest.h>
 
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -126,4 +127,32 @@ TEST_CASE("invalid UTF-16 is rejected, never silently repaired") {
 
 TEST_CASE("valid surrogate pair embedded in text round-trips") {
     check_round_trip("before \xF0\x9F\x9A\x80 after");
+}
+
+TEST_CASE("Win32 length boundary: sizes up to INT_MAX are accepted, beyond rejected") {
+    // All boundary arithmetic happens in std::size_t: computing INT_MAX + 1
+    // in int arithmetic would be signed overflow (undefined behavior), while
+    // size_t easily holds it. No string is ever allocated in this test.
+    const std::size_t int_max =
+        static_cast<std::size_t>(std::numeric_limits<int>::max());
+
+    // INT_MAX - 1: accepted.
+    const std::optional<int> below = to_win32_length(int_max - 1);
+    REQUIRE(below.has_value());
+    CHECK(*below == std::numeric_limits<int>::max() - 1);
+
+    // INT_MAX exactly: accepted (the largest length Win32 can take).
+    const std::optional<int> exact = to_win32_length(int_max);
+    REQUIRE(exact.has_value());
+    CHECK(*exact == std::numeric_limits<int>::max());
+
+    // INT_MAX + 1: rejected - cannot be passed to Win32 in one call.
+    const std::optional<int> above = to_win32_length(int_max + 1);
+    CHECK_FALSE(above.has_value());
+
+    // Sanity: zero is a valid length value for the helper itself; the
+    // converters handle empty input before the length check.
+    const std::optional<int> zero = to_win32_length(0);
+    REQUIRE(zero.has_value());
+    CHECK(*zero == 0);
 }

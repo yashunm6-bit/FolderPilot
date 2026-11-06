@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -31,6 +33,18 @@ struct Utf8ConversionResult {
     std::string value;
     std::string error;
 };
+
+// Largest number of code units a single Win32 conversion call can accept:
+// the Win32 APIs take int lengths, and INT_MAX is their upper bound.
+inline constexpr std::size_t kMaxConversionLength =
+    static_cast<std::size_t>((std::numeric_limits<int>::max)());
+
+// Converts a buffer size (in code units) to the int length that the Win32
+// conversion APIs accept. Returns std::nullopt when `size` exceeds INT_MAX,
+// because such a buffer cannot be passed to Win32 in a single call.
+// Pure and allocation-free; exposed so the boundary can be unit-tested
+// without allocating multi-gigabyte strings.
+std::optional<int> to_win32_length(std::size_t size);
 
 // Converts UTF-8 input (explicit length via the string_view) to UTF-16.
 // Empty input converts successfully to an empty result.
