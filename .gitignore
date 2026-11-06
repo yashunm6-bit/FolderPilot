@@ -1,0 +1,33 @@
+# --- Build output -----------------------------------------------------
+build/
+out/
+
+# --- Local, machine-specific CMake overrides --------------------------
+CMakeUserPresets.json
+
+# --- IDE / editor artifacts -------------------------------------------
+.vs/
+.vscode/
+.idea/
+.cache/
+*.user
+*.suo
+
+# --- Compiler / linker byproducts (defensive) --------------------------
+*.o
+*.obj
+*.exe
+*.lib
+*.a
+
+# --- Generated tooling artifacts ---------------------------------------
+compile_commands.json
+
+# --- OS junk ------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Local environment files --------------------------------------------
+.env
+.env.*
