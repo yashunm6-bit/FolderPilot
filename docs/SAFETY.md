@@ -2,9 +2,10 @@
 
 > **STATUS: PLANNED — NOT YET IMPLEMENTED.**
 >
-> FolderPilot 0.1.0 is a Phase 1 scaffold. It currently has **no** scanning,
-> classification, planning, or movement capability, and therefore currently
-> provides **no** file protection or file organization of any kind.
+> FolderPilot 0.1.0 is a Phase 2 codebase: the build/test foundation and a
+> pure, in-memory filename classifier exist, but there is still **no**
+> scanning, planning, or movement capability, and therefore currently
+> **no** file protection or file organization of any kind.
 >
 > This document records the architectural safety requirements ratified in
 > Engineering Plan v2.5. Every invariant below is marked

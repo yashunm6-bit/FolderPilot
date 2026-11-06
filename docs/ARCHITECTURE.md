@@ -1,11 +1,11 @@
 # FolderPilot — Architecture
 
-> **Implementation status: Phase 1 scaffold.**
+> **Implementation status: Phase 2 (classification core) complete.**
 > This document records the architecture approved in Engineering Plan v2.5
 > (plus the ratified directory-enumeration mechanism). Only items marked
 > **IMPLEMENTED** exist in code today. Everything else is **PLANNED — NOT YET
-> IMPLEMENTED**. FolderPilot currently cannot scan, classify, organize, or
-> move any files.
+> IMPLEMENTED**. FolderPilot can classify filenames in memory only; it still
+> cannot scan directories, organize, or move any files.
 
 ---
 
@@ -16,7 +16,11 @@
 | Build system: CMake ≥ 3.21, Ninja, presets, CTest | **IMPLEMENTED** (Phase 1) |
 | Test foundation: vendored doctest, smoke test | **IMPLEMENTED** (Phase 1) |
 | Application entry point (scaffold only) | **IMPLEMENTED** (Phase 1) |
-| Core library: rules, classifier, scanner, planner, reporter | PLANNED — NOT YET IMPLEMENTED (Phases 2–4) |
+| Core types: `Category`, stable display names | **IMPLEMENTED** (Phase 2) |
+| Extension rules: sorted static table, binary-search lookup | **IMPLEMENTED** (Phase 2) |
+| Pure filename classification (no filesystem access) | **IMPLEMENTED** (Phase 2) |
+| Platform text utilities: strict UTF-8 / UTF-16 conversion | **IMPLEMENTED** (Phase 2) |
+| Scanner, PathGuard, planner, reporter, executor | PLANNED — NOT YET IMPLEMENTED (Phases 3–5) |
 | Platform layer: attribute inspection, NtCreateFile relative opens, handle-based movement | PLANNED — NOT YET IMPLEMENTED (Phases 3, 5) |
 | Dry-run reporter, `--apply` executor | PLANNED — NOT YET IMPLEMENTED (Phases 4–5) |
 | Any file organization behavior | PLANNED — NOT YET IMPLEMENTED |
@@ -93,8 +97,11 @@ Safety invariants and their wording constraints: see
   `third_party/doctest/doctest.h`, pinned to upstream release
   **v2.5.3** (version macros verified: 2 / 5 / 3), with the upstream MIT
   licence preserved at `third_party/doctest/LICENSE.txt`.
-- One test runner (`folderpilot_tests`); CTest entry `smoke`.
-  Per-case discovery may be added as the suite grows.
+- One test runner (`folderpilot_tests`); CTest entry `unit_tests` runs all
+  registered doctest cases. Per-case discovery may be added as the suite
+  grows.
+- Phase 2 suites: `test_category`, `test_rules`, `test_classifier`,
+  `test_text` (all purely in-memory), plus the Phase 1 smoke test.
 - All future integration tests operate exclusively in isolated temporary
   directories; tests never target real user data. `remove_all` appears only
   in test-fixture cleanup, never in product code.
@@ -104,8 +111,38 @@ Safety invariants and their wording constraints: see
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Project scaffold and build system | **IMPLEMENTED** |
-| 2 | Core types and classification | PLANNED |
+| 2 | Core types and classification | **IMPLEMENTED** |
 | 3 | PathGuard and directory scanner | PLANNED |
 | 4 | Planner and dry-run | PLANNED |
 | 5 | Safe executor | PLANNED |
 | 6 | Hardening, tests and documentation | PLANNED |
+
+## 8. Phase 2 implementation notes (IMPLEMENTED)
+
+- **Classification is pure.** `classify_filename(std::string_view)` performs
+  no filesystem access of any kind — it is a deterministic string function,
+  testable entirely in memory.
+- **Case handling is ASCII-only and locale-free.** Only `'A'..'Z'` are
+  folded; UTF-8 bytes (≥ 0x80) are never touched, so Unicode basenames pass
+  through byte-exact. No locale-dependent `tolower` anywhere.
+- **Compound archives** (`.tar.gz`, `.tar.bz2`, `.tar.xz`) are recognized
+  before single-extension lookup. The extension after the LAST dot decides
+  otherwise; dotfiles (`.gitignore`, `.pdf`), names ending in a dot, and
+  unknown extensions map to `Other`.
+- **Rule table**: 90 documented extensions across Documents (15), Images
+  (14), Videos (11), Audio (11), Archives (11), Code (28) — stored as a
+  `constexpr` sorted array, searched by ASCII case-insensitive binary
+  search, `Other` is the fallback with no table entries.
+- **Normative-conflict resolution (`.ts`)**: the Phase 2 rule lists contained
+  `.ts` under both Videos and Code, while every extension must map to
+  exactly one category. Resolved to **Code** (TypeScript, beside `js`);
+  MPEG transport streams are the rare real-world case. Videos documents 11
+  extensions; the unique total is **89**.
+- **Text conversion** uses `CP_UTF8` with `MB_ERR_INVALID_CHARS` /
+  `WC_ERR_INVALID_CHARS` — invalid input is rejected with an explicit error,
+  never repaired, never best-fit translated, and the ANSI code page is never
+  consulted. Explicit lengths throughout; embedded NUL bytes survive;
+  conversion is byte-exact round-trip, never normalizing. Documented Win32
+  nuance: with explicit (non `-1`) source lengths, the size query and the
+  conversion both return exactly the converted count — no terminator is
+  appended or counted.

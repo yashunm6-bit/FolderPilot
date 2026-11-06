@@ -37,6 +37,28 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 # ---------------------------------------------------------------------------
+# Core library: pure, portable logic. No filesystem access, no Win32 calls.
+# Phase 2 scope: category type, extension rules, pure filename classifier.
+# ---------------------------------------------------------------------------
+add_library(folderpilot_core STATIC
+    lib/folderpilot/category.cpp
+    lib/folderpilot/rules.cpp
+    lib/folderpilot/classifier.cpp
+)
+target_include_directories(folderpilot_core PUBLIC ${CMAKE_SOURCE_DIR}/lib)
+target_link_libraries(folderpilot_core PUBLIC folderpilot_build_options)
+
+# ---------------------------------------------------------------------------
+# Platform library: Windows-specific helpers.
+# Phase 2 scope: strict UTF-8 / UTF-16 text conversion.
+# ---------------------------------------------------------------------------
+add_library(folderpilot_platform STATIC
+    platform/text.cpp
+)
+target_include_directories(folderpilot_platform PUBLIC ${CMAKE_SOURCE_DIR}/platform)
+target_link_libraries(folderpilot_platform PUBLIC folderpilot_build_options)
+
+# ---------------------------------------------------------------------------
 # Application: the FolderPilot CLI.
 # Phase 1 scope: scaffold entry point only. Scanning, classification,
 # planning and movement arrive in later phases.
