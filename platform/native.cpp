@@ -191,11 +191,25 @@ NativeResult resolved_final_path(HANDLE handle, std::string& out_utf8) {
     return {true, NativeFailure::Other, {}, 0};
 }
 
-// Volume-GUID identity for a plain drive-form path (the approved chain).
-NativeResult volume_identity_for_path(const std::wstring& dos_path, VolumeIdentity& out) {
+} // namespace
+
+std::wstring normalize_volume_mount_point(std::wstring_view mount_point) {
+    std::wstring normalized{mount_point};
+    // Strip ALL trailing backslashes, then append EXACTLY one.
+    while (!normalized.empty() && normalized.back() == L'\\') {
+        normalized.pop_back();
+    }
+    normalized.push_back(L'\\');
+    return normalized;
+}
+
+NativeResult volume_identity_for_path(std::wstring_view dos_path, VolumeIdentity& out) {
+    // Null-terminated working copy for the Win32 APIs.
+    const std::wstring path{dos_path};
+
     std::wstring mount_point(1024, L'\0');
     const DWORD written = ::GetVolumePathNameW(
-        dos_path.c_str(), mount_point.data(), static_cast<DWORD>(mount_point.size()));
+        path.c_str(), mount_point.data(), static_cast<DWORD>(mount_point.size()));
     if (written == 0) {
         return {false, NativeFailure::Other,
                 win32_message("GetVolumePathNameW", ::GetLastError()), ::GetLastError()};
@@ -203,12 +217,7 @@ NativeResult volume_identity_for_path(const std::wstring& dos_path, VolumeIdenti
     // GetVolumePathNameW's return length INCLUDES the terminating null -
     // drop it so the normalization below sees the real mount point.
     mount_point.resize(written - 1);
-
-    // Normalize: strip ALL trailing backslashes, then append EXACTLY one.
-    while (!mount_point.empty() && mount_point.back() == L'\\') {
-        mount_point.pop_back();
-    }
-    mount_point.push_back(L'\\');
+    mount_point = normalize_volume_mount_point(mount_point);
 
     wchar_t guid[100]{}; // documented maximum size for volume GUID paths
     if (!::GetVolumeNameForVolumeMountPointW(mount_point.c_str(), guid, 100)) {
@@ -229,8 +238,6 @@ NativeResult volume_identity_for_path(const std::wstring& dos_path, VolumeIdenti
     out.volume_guid_path = narrow.value;
     return {true, NativeFailure::Other, {}, 0};
 }
-
-} // namespace
 
 // ---------------------------------------------------------------------------
 // Pure helpers.

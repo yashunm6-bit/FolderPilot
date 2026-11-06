@@ -158,6 +158,7 @@ TEST_CASE("PathGuard rejects hidden and system target directories") {
         const auto result = validate_target(dir.u8());
         CHECK_FALSE(result.ok);
         CHECK(result.rejection == PathRejection::HiddenDirectory);
+        CHECK_FALSE(result.root.valid()); // cleanup on failure
     }
     {
         fixture::SandboxDir dir{"pg-system"};
@@ -165,6 +166,7 @@ TEST_CASE("PathGuard rejects hidden and system target directories") {
         const auto result = validate_target(dir.u8());
         CHECK_FALSE(result.ok);
         CHECK(result.rejection == PathRejection::SystemDirectory);
+        CHECK_FALSE(result.root.valid()); // cleanup on failure
     }
 }
 
@@ -180,6 +182,19 @@ TEST_CASE("PathGuard rejects a target that is a reparse point") {
     const auto result = validate_target(dir.u8() + "\\junction");
     CHECK_FALSE(result.ok);
     CHECK(result.rejection == PathRejection::ReparseLeafDirectory);
+    CHECK_FALSE(result.root.valid()); // cleanup on failure
+}
+
+TEST_CASE("volume identity is stable across fixtures on the same volume") {
+    fixture::SandboxDir a{"vol-alpha"};
+    fixture::SandboxDir b{"vol-beta"};
+    const auto ra = validate_target(a.u8());
+    const auto rb = validate_target(b.u8());
+    REQUIRE(ra.ok);
+    REQUIRE(rb.ok);
+    CHECK(ra.volume.volume_guid_path == rb.volume.volume_guid_path);
+    CHECK(ra.volume.volume_guid_path.starts_with("\\\\?\\Volume{"));
+    CHECK(ra.volume.volume_guid_path.ends_with("}\\"));
 }
 
 TEST_CASE("PathGuard handles Unicode target directories") {

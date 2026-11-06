@@ -92,6 +92,19 @@ struct VolumeIdentity {
     std::string volume_guid_path;  // UTF-8, "\\?\Volume{GUID}\" form
 };
 
+// Normalizes a volume mount-point string for
+// GetVolumeNameForVolumeMountPointW: strips ALL trailing backslashes, then
+// appends EXACTLY one. Idempotent: normalizing twice yields the same string.
+// Pure; exposed for direct unit testing.
+std::wstring normalize_volume_mount_point(std::wstring_view mount_point);
+
+// Resolves the volume-GUID identity of an EXISTING local drive-form path
+// (the approved chain: GetVolumePathNameW -> normalize ->
+// GetVolumeNameForVolumeMountPointW). Fails closed: API failures are
+// reported, and non-local (network/special) volumes are Unsupported.
+// `dos_path` must be an absolute backslash path that exists.
+NativeResult volume_identity_for_path(std::wstring_view dos_path, VolumeIdentity& out);
+
 // ---------------------------------------------------------------------------
 // Root directory: the single path-based bootstrap open + retained RAII handle.
 // ---------------------------------------------------------------------------

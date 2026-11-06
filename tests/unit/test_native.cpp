@@ -57,8 +57,7 @@ TEST_CASE("compare_ordinal_ci is ordinal and case-insensitive") {
     CHECK(compare_ordinal_ci("abc", "abd") < 0);
 }
 
-TEST_CASE("identity representations never compare across variants") {
-    FILE_ID_128 id_a{}; id_a.Identifier[0] = 1;
+TEST_CASE("identity representations never compare across variants") {    FILE_ID_128 id_a{}; id_a.Identifier[0] = 1;
     FILE_ID_128 id_b{}; id_b.Identifier[0] = 1;
     FILE_ID_128 id_c{}; id_c.Identifier[0] = 2;
 
@@ -105,6 +104,26 @@ std::size_t align8(std::size_t value) {
 }
 
 } // namespace
+
+TEST_CASE("volume mount-point normalization leaves exactly one trailing backslash") {
+    CHECK(normalize_volume_mount_point(L"C:\\") == L"C:\\");
+    CHECK(normalize_volume_mount_point(L"C:") == L"C:\\");
+    CHECK(normalize_volume_mount_point(L"C:\\\\\\\\") == L"C:\\"); // many trailing
+    CHECK(normalize_volume_mount_point(L"D:\\mounts\\data") == L"D:\\mounts\\data\\");
+    CHECK(normalize_volume_mount_point(L"D:\\mounts\\data\\\\") == L"D:\\mounts\\data\\");
+    CHECK(normalize_volume_mount_point(L"") == L"\\");
+    // Idempotent: normalizing twice is the same as normalizing once.
+    const std::wstring once = normalize_volume_mount_point(L"E:\\x\\\\");
+    CHECK(normalize_volume_mount_point(once) == once);
+}
+
+TEST_CASE("volume identity fails closed for nonexistent paths") {
+    VolumeIdentity out;
+    const auto result = volume_identity_for_path(L"Q:\\definitely-not-here-98765", out);
+    CHECK_FALSE(result.ok);
+    CHECK(!result.error.empty());
+    CHECK((result.failure == NativeFailure::Other || result.failure == NativeFailure::Unsupported));
+}
 
 TEST_CASE("directory buffer parser accepts a single valid entry") {
     const auto buffer = build_entry(L"report.pdf", 0);
