@@ -33,27 +33,41 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # STATUS_ENTRYPOINT_NOT_FOUND. Static linking removes any dependency
         # on PATH order.
         target_link_options(folderpilot_build_options INTERFACE -static)
+        # Phase 3 uses Vista/Win8+ surfaces (GetFileInformationByHandleEx with
+        # FileIdBothDirectoryInfo, FileIdInfo). Target Windows 10 uniformly so
+        # every target sees the same declarations and struct layouts.
+        target_compile_definitions(folderpilot_build_options INTERFACE
+            _WIN32_WINNT=0x0A00
+            WINVER=0x0A00
+            NOMINMAX
+        )
     endif()
 endif()
 
 # ---------------------------------------------------------------------------
-# Core library: pure, portable logic. No filesystem access, no Win32 calls.
-# Phase 2 scope: category type, extension rules, pure filename classifier.
+# Core library: policy and orchestration logic (classification, PathGuard,
+# scanner). Filesystem/Win32 calls happen only through the platform library.
 # ---------------------------------------------------------------------------
 add_library(folderpilot_core STATIC
     lib/folderpilot/category.cpp
     lib/folderpilot/rules.cpp
     lib/folderpilot/classifier.cpp
+    lib/folderpilot/path_guard.cpp
+    lib/folderpilot/scanner.cpp
 )
 target_include_directories(folderpilot_core PUBLIC ${CMAKE_SOURCE_DIR}/lib)
-target_link_libraries(folderpilot_core PUBLIC folderpilot_build_options)
+target_link_libraries(folderpilot_core PUBLIC
+    folderpilot_build_options
+    folderpilot_platform
+)
 
 # ---------------------------------------------------------------------------
-# Platform library: Windows-specific helpers.
-# Phase 2 scope: strict UTF-8 / UTF-16 text conversion.
+# Platform library: Windows-specific helpers (native file handling, RAII
+# handles, UTF conversion, enumeration, native error mapping).
 # ---------------------------------------------------------------------------
 add_library(folderpilot_platform STATIC
     platform/text.cpp
+    platform/native.cpp
 )
 target_include_directories(folderpilot_platform PUBLIC ${CMAKE_SOURCE_DIR}/platform)
 target_link_libraries(folderpilot_platform PUBLIC folderpilot_build_options)

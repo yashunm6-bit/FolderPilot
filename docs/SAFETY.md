@@ -1,17 +1,16 @@
 # FolderPilot — Safety Invariants
 
-> **STATUS: PLANNED — NOT YET IMPLEMENTED.**
+> **STATUS: PARTIALLY IMPLEMENTED — read-only validation and scanning (Phase 3).**
 >
-> FolderPilot 0.1.0 is a Phase 2 codebase: the build/test foundation and a
-> pure, in-memory filename classifier exist, but there is still **no**
-> scanning, planning, or movement capability, and therefore currently
-> **no** file protection or file organization of any kind.
+> FolderPilot 0.1.0 can now validate a target directory (PathGuard) and
+> enumerate its immediate files through retained handles (Phase 3), strictly
+> read-only. There is still **no** planning, dry-run reporting, movement, or
+> any user-facing organization capability.
 >
 > This document records the architectural safety requirements ratified in
-> Engineering Plan v2.5. Every invariant below is marked
-> **PLANNED — NOT YET IMPLEMENTED**; the guarantee wording must never claim
-> more than the implemented mechanism provides. Each invariant is enforced by
-> dedicated tests as its phase lands.
+> Engineering Plan v2.5. Each invariant below carries its own status marker;
+> the guarantee wording must never claim more than the implemented mechanism
+> provides. Each invariant is enforced by dedicated tests as its phase lands.
 
 ---
 
@@ -29,7 +28,7 @@ unreachable without it, and the plan executed is exactly the immutable plan
 the executor was given — no destination names are invented at execution time.
 
 ## 3. No file deletion in the product
-**PLANNED — NOT YET IMPLEMENTED**
+**HOLDS BY CONSTRUCTION (Phases 1–3); re-verified each phase**
 Product code contains no delete/remove operations. Files are only ever moved
 within the selected root. `remove_all` exists exclusively in test-fixture
 cleanup. This is a review-enforced structural invariant.
@@ -43,12 +42,12 @@ A conflicting move fails as `Conflict`: the source remains untouched and the
 destination content remains unchanged; other independent moves continue.
 
 ## 5. No recursive scanning in the MVP
-**PLANNED — NOT YET IMPLEMENTED**
+**IMPLEMENTED (Phase 3)**
 Enumeration covers only the immediate children of the validated root.
 Subdirectories are never entered, moved, or modified.
 
 ## 6. Reparse-point protection
-**PLANNED — NOT YET IMPLEMENTED**
+**IMPLEMENTED for validation and scanning (Phase 3); destination-side gates PLANNED (Phase 4+)**
 Leaf reparse points (symlinks, junctions, OneDrive/cloud placeholders — any
 tag) are detected via `FileAttributeTagInfo` on handles opened with
 `FILE_OPEN_REPARSE_POINT`, never via `is_symlink`-style checks, and are
@@ -57,14 +56,13 @@ approved resolve-and-allow policy: the single path-based bootstrap open
 resolves them, and all safety checks apply to the resolved location.
 
 ## 7. Hidden/system file protection
-**PLANNED — NOT YET IMPLEMENTED**
+**IMPLEMENTED for entries and the target directory (Phase 3); category-directory gates PLANNED (Phase 4)**
 Entries with `FILE_ATTRIBUTE_HIDDEN` or `FILE_ATTRIBUTE_SYSTEM` are skipped
-with a reported reason. The selected target directory and existing category
-directories are subject to the same gate: a reparse-point, hidden, system, or
-non-directory category is reported unsafe and receives zero planned moves.
+with a reported reason. The selected target directory is subject to the same
+gate and is rejected when hidden, system, or a reparse point.
 
 ## 8. Component-aware path validation
-**PLANNED — NOT YET IMPLEMENTED**
+**IMPLEMENTED (Phase 3)**
 PathGuard validates the target using canonical, component-wise comparisons
 with depth-policy denylist matching and Windows case-insensitivity — never
 naive string prefixes. Drive roots, UNC paths, and denylisted system
@@ -72,39 +70,37 @@ locations are refused. The denylist is defense in depth, not a security
 boundary.
 
 ## 9. Root-relative filesystem operations
-**PLANNED — NOT YET IMPLEMENTED**
+**IMPLEMENTED for the bootstrap, enumeration, and source opens (Phase 3); category creation and movement PLANNED (Phases 4–5)**
 Exactly one path-based bootstrap open establishes the validated root handle
 (reparse inspection, attributes, identity, resolved path all through that
-handle). Every subsequent source open, category open, and directory creation
-is performed with `NtCreateFile` relative to the retained root handle. The
-root object is identity-checked against the plan; no absolute-path opens
-exist in the executor.
+handle). Every subsequent source open is performed with `NtCreateFile`
+relative to the retained root handle. Root identity and resolved path are
+captured at open time; identity re-verification against the plan arrives
+with the planner (Phase 4).
 
 ## 10. Source and destination handle protection
-**PLANNED — NOT YET IMPLEMENTED**
-Retained root, destination, and source handles are opened **without**
-`FILE_SHARE_DELETE`: pre-existing DELETE-capable handles cause a safe
-acquisition failure, and once acquired, no normal user-mode process can
-rename or delete those objects during the execution window. Source identity
-is verified before each move; a replaced source is skipped, leaving both the
-original location's contents and the replacement untouched.
+**IMPLEMENTED for the open policy and identity capture (Phase 3); execution-window protection PLANNED (Phase 5)**
+Retained root and source handles are opened **without** `FILE_SHARE_DELETE`:
+pre-existing DELETE-capable handles cause a safe acquisition failure, and
+while a handle is held, no normal user-mode process can rename or delete the
+object. Source identity is captured from the actual opened handle; its
+re-verification before each move arrives with the executor (Phase 5).
 
 ## 11. Isolated temporary directories for tests
-**PLANNED — NOT YET IMPLEMENTED** (test-infra rule, effective for all future
-test phases)
-All tests operate exclusively within isolated temporary directories created
-by the test-fixture helper. Tests never target the real Downloads folder or
-any user data. Canary directories assert that nothing is created or moved
-outside the validated root.
+**IMPLEMENTED (Phase 3)**
+All filesystem tests operate exclusively inside
+`build/phase3-test-sandbox/`, created and cleaned by the test-fixture helper
+after canonical-path verification. Tests never target the real Downloads
+folder, any user data, or `%TEMP%`.
 
 ## 12. Fail-closed behavior
-**PLANNED — NOT YET IMPLEMENTED**
-Only confirmed absence permits creating a category directory. Access denied,
-invalid paths, unreadable attributes, unverifiable volume identity, and all
-other unresolved states fail closed: the affected move or category is skipped
-with a specific reported reason, sources and destinations are left untouched,
-and independent work continues. Exit codes: 0 success/dry-run, 1 usage,
-2 safety refusal, 3 completed with failures, 4 aborted.
+**IMPLEMENTED for validation and scanning (Phase 3); move-time behavior PLANNED (Phase 5)**
+Invalid paths, missing targets, unreadable attributes, unverifiable volume
+identity, and all other unresolved states fail closed: the affected entry or
+the whole scan is reported as failed — never as an apparently successful
+empty result. One failing entry never aborts the batch. Exit codes:
+0 success/dry-run, 1 usage, 2 safety refusal, 3 completed with failures,
+4 aborted (mapping arrives with the CLI phases).
 
 ---
 

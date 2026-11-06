@@ -1,11 +1,12 @@
 # FolderPilot — Architecture
 
-> **Implementation status: Phase 2 (classification core) complete.**
+> **Implementation status: Phase 3 (PathGuard & scanner) complete.**
 > This document records the architecture approved in Engineering Plan v2.5
 > (plus the ratified directory-enumeration mechanism). Only items marked
 > **IMPLEMENTED** exist in code today. Everything else is **PLANNED — NOT YET
-> IMPLEMENTED**. FolderPilot can classify filenames in memory only; it still
-> cannot scan directories, organize, or move any files.
+> IMPLEMENTED**. FolderPilot can classify filenames in memory, validate a
+> target directory, and enumerate its immediate files — strictly read-only.
+> It still cannot plan, organize, or move any files.
 
 ---
 
@@ -20,8 +21,14 @@
 | Extension rules: sorted static table, binary-search lookup | **IMPLEMENTED** (Phase 2) |
 | Pure filename classification (no filesystem access) | **IMPLEMENTED** (Phase 2) |
 | Platform text utilities: strict UTF-8 / UTF-16 conversion | **IMPLEMENTED** (Phase 2) |
-| Scanner, PathGuard, planner, reporter, executor | PLANNED — NOT YET IMPLEMENTED (Phases 3–5) |
-| Platform layer: attribute inspection, NtCreateFile relative opens, handle-based movement | PLANNED — NOT YET IMPLEMENTED (Phases 3, 5) |
+| PathGuard: target validation, attribute gates, component-aware denylist | **IMPLEMENTED** (Phase 3) |
+| Root bootstrap: single path-based `NtCreateFile` open, RAII handle, resolved path, identity, volume GUID | **IMPLEMENTED** (Phase 3) |
+| Directory scanner: handle-anchored enumeration, non-recursive, structured skip reasons | **IMPLEMENTED** (Phase 3) |
+| Source identity capture from opened handles (`FileIdInfo` + separate legacy fallback) | **IMPLEMENTED** (Phase 3) |
+| Platform layer: native file handling (`NtCreateFile`, runtime-resolved ntdll functions) | **IMPLEMENTED** (Phase 3, bootstrap + source opens) |
+| Planner, collision resolution, reporter | PLANNED — NOT YET IMPLEMENTED (Phase 4) |
+| Executor, safe movement (`SetFileInformationByHandle`) | PLANNED — NOT YET IMPLEMENTED (Phase 5) |
+| Dry-run reporter, `--apply` executor | PLANNED — NOT YET IMPLEMENTED (Phases 4–5) |
 | Dry-run reporter, `--apply` executor | PLANNED — NOT YET IMPLEMENTED (Phases 4–5) |
 | Any file organization behavior | PLANNED — NOT YET IMPLEMENTED |
 
@@ -102,6 +109,14 @@ Safety invariants and their wording constraints: see
   grows.
 - Phase 2 suites: `test_category`, `test_rules`, `test_classifier`,
   `test_text` (all purely in-memory), plus the Phase 1 smoke test.
+- Phase 3 suites: `test_native` (pure parser/comparator/identity),
+  `test_path_guard` (pure denylist + sandboxed bootstrap),
+  `test_scanner` (sandboxed integration) with fixture helpers in
+  `phase3_fixture.*`.
+- Phase 3 filesystem fixtures live exclusively under
+  `build/phase3-test-sandbox/` (never `%TEMP%`, never user folders); cleanup
+  removes only the verified fixture directory. Capability-gated tests
+  (junctions) report skips explicitly.
 - All future integration tests operate exclusively in isolated temporary
   directories; tests never target real user data. `remove_all` appears only
   in test-fixture cleanup, never in product code.
@@ -112,10 +127,60 @@ Safety invariants and their wording constraints: see
 |---|---|---|
 | 1 | Project scaffold and build system | **IMPLEMENTED** |
 | 2 | Core types and classification | **IMPLEMENTED** |
-| 3 | PathGuard and directory scanner | PLANNED |
+| 3 | PathGuard and directory scanner | **IMPLEMENTED** |
 | 4 | Planner and dry-run | PLANNED |
 | 5 | Safe executor | PLANNED |
 | 6 | Hardening, tests and documentation | PLANNED |
+
+## 9. Phase 3 implementation notes (IMPLEMENTED)
+
+- **Bootstrap**: exactly one path-based open per target, via
+  runtime-resolved `NtCreateFile` (no conflicting NT prototypes anywhere);
+  the DOS path is classified first (relative / drive-relative / UNC / device
+  / ADS / forward-slash / embedded-NUL all rejected), converted with
+  `RtlDosPathNameToNtPathName_U`, and the resulting NT form is verified
+  (`\??\X:`) before use. Access: `FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
+  | FILE_TRAVERSE | FILE_ADD_SUBDIRECTORY | SYNCHRONIZE`; share
+  `FILE_SHARE_READ | FILE_SHARE_WRITE` (no `FILE_SHARE_DELETE`); options
+  `FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT |
+  FILE_SYNCHRONOUS_IO_NONALERT`; disposition `FILE_OPEN` (never creates).
+- **Verified payload**: attributes via `FileAttributeTagInfo`, resolved
+  final path via `GetFinalPathNameByHandleW` (extended-length and UNC
+  prefixes recognized explicitly), identity via `FileIdInfo` with the legacy
+  `GetFileInformationByHandle` fallback kept as a strictly separate variant,
+  volume identity via `GetVolumePathNameW` → normalization (exactly one
+  trailing backslash) → `GetVolumeNameForVolumeMountPointW` (local volume
+  GUIDs only).
+- **Denylist**: component-aware over the resolved path with
+  `CompareStringOrdinal` case-insensitive matching; drive roots rejected;
+  eight system subtrees rejected; `Users` node + direct children rejected,
+  deeper allowed; current-user home root rejected. No string-prefix
+  matching anywhere; evaluation is a pure, unit-tested function.
+- **Enumeration**: `GetFileInformationByHandleEx` with
+  `FileIdBothDirectoryRestartInfo` then `FileIdBothDirectoryInfo` batches on
+  the retained root handle; strict parser validates header bounds, 8-byte
+  alignment of `NextEntryOffset`, even `FileNameLength`, and name-region
+  bounds; the chain ends at `NextEntryOffset == 0` (the Win32 API does not
+  report the written byte count). A single entry larger than the buffer
+  fails the scan rather than being skipped.
+- **Scanner**: non-recursive; `.`/`..`, directories, reparse points
+  (any tag), hidden, and system entries are skipped with structured reasons
+  before any open; candidates are opened relative to the root handle
+  (`DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE`, share R|W, no
+  `FILE_SHARE_DELETE`, `FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT`);
+  the opened handle is the source of truth for attributes, size, times, and
+  identity; every source handle is closed after inspection. A single
+  failing entry never aborts the batch; an enumeration failure fails the
+  whole scan (never an apparent empty success).
+- **Determinism**: results are sorted with ordinal case-insensitive
+  comparison and a stable byte-wise tie-break; name-equal entries are never
+  deduplicated.
+- **Known platform observations** (documented, handled): some filesystem
+  surfaces return `.`/`..` through directory enumeration — the scanner
+  skips them defensively as `ReservedName`; a directory reparse point
+  replacing a candidate file is rejected by the `FILE_NON_DIRECTORY_FILE`
+  open (`NotRegularFile`) before any tag check — both outcomes are safe
+  rejections of the link.
 
 ## 8. Phase 2 implementation notes (IMPLEMENTED)
 

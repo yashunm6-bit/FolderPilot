@@ -6,12 +6,13 @@ FolderPilot will sort the files of a user-selected directory into category
 folders (Documents, Images, Videos, Audio, Archives, Code, Other) — showing a
 dry-run plan by default and moving files only on an explicit `--apply`.
 
-## Status: Phase 2 — classification core
+## Status: Phase 3 — safe target validation & scanning
 
-Phase 1 delivered the build/test foundation; Phase 2 added the pure,
-in-memory classification core (category type, extension rules, filename
-classifier) and strict UTF-8/UTF-16 conversion utilities.
-**FolderPilot cannot scan directories, organize, or move any files yet.**
+Phase 1 delivered the build/test foundation; Phase 2 added the pure
+in-memory classification core and strict UTF-8/UTF-16 conversion; Phase 3
+added PathGuard (target validation) and a handle-anchored, non-recursive
+directory scanner — strictly read-only.
+**FolderPilot cannot plan, organize, or move any files yet.**
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — approved design, and which
   parts are implemented vs. planned.
@@ -35,8 +36,8 @@ work with `--preset release`.
 | Directory | Contents |
 |---|---|
 | `app/` | CLI entry point |
-| `lib/folderpilot/` | Core library: category, rules, classifier (Phase 2) |
-| `platform/` | Windows platform layer: text conversion (Phase 2) |
+| `lib/folderpilot/` | Core library: classification, PathGuard, scanner (Phases 2–3) |
+| `platform/` | Windows platform layer: native file handling, text conversion (Phases 2–3) |
 | `tests/` | doctest unit and integration tests |
 | `third_party/doctest/` | Vendored doctest (pinned release + upstream licence) |
 | `docs/` | Architecture and safety documentation |
