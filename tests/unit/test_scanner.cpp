@@ -146,6 +146,79 @@ TEST_CASE("scanner handles multiple enumeration batches with a small buffer") {
                          }));
 }
 
+TEST_CASE("scanner lists ordinary files spanning every category extension group") {
+    fixture::SandboxDir dir{"scan-categories"};
+    // One sample extension per category, plus an unknown extension and a
+    // file without any extension. Phase 3 does not classify - the scanner
+    // must simply list every one of them as an ordinary regular file.
+    REQUIRE(fixture::create_file(dir.path(), L"document.pdf", "d"));
+    REQUIRE(fixture::create_file(dir.path(), L"image.jpg", "i"));
+    REQUIRE(fixture::create_file(dir.path(), L"video.mp4", "v"));
+    REQUIRE(fixture::create_file(dir.path(), L"audio.mp3", "a"));
+    REQUIRE(fixture::create_file(dir.path(), L"archive.zip", "z"));
+    REQUIRE(fixture::create_file(dir.path(), L"source.cpp", "c"));
+    REQUIRE(fixture::create_file(dir.path(), L"unknown.xyz", "u"));
+    REQUIRE(fixture::create_file(dir.path(), L"no-extension", "n"));
+
+    const auto guard = validate_target(dir.u8());
+    REQUIRE(guard.ok);
+    const auto result = scan_directory(guard.root);
+    REQUIRE(result.enumeration == EnumerationStatus::Ok);
+    REQUIRE(result.files.size() == 8);
+    // Only possible skips are the filesystem's "." / ".." noise.
+    for (const SkippedEntry& entry : result.skipped) {
+        CHECK(entry.reason == SkipReason::ReservedName);
+    }
+    CHECK(find_file(result, "document.pdf") != nullptr);
+    CHECK(find_file(result, "image.jpg") != nullptr);
+    CHECK(find_file(result, "video.mp4") != nullptr);
+    CHECK(find_file(result, "audio.mp3") != nullptr);
+    CHECK(find_file(result, "archive.zip") != nullptr);
+    CHECK(find_file(result, "source.cpp") != nullptr);
+    CHECK(find_file(result, "unknown.xyz") != nullptr);
+    CHECK(find_file(result, "no-extension") != nullptr);
+}
+
+TEST_CASE("batch error isolation: one locked file does not affect later batches") {
+    fixture::SandboxDir dir{"scan-isolation"};
+    for (int i = 0; i < 60; ++i) {
+        wchar_t name[32];
+        std::swprintf(name, 32, L"iso-file-%03d.dat", i);
+        REQUIRE(fixture::create_file(dir.path(), name, "x"));
+    }
+    // Lock a file that sorts into the FIRST batch; everything after it -
+    // including later batches - must still be scanned.
+    REQUIRE(fixture::create_file(dir.path(), L"iso-file-000-locked.dat", "busy"));
+
+    RawHandle held;
+    held.handle = ::CreateFileW((dir.path() / L"iso-file-000-locked.dat").c_str(), DELETE,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held.handle != INVALID_HANDLE_VALUE);
+
+    const auto guard = validate_target(dir.u8());
+    REQUIRE(guard.ok);
+
+    ScanOptions options;
+    options.buffer_bytes = 2048; // small buffer: many batches
+    const auto result = scan_directory(guard.root, options);
+    REQUIRE(result.enumeration == EnumerationStatus::Ok);
+
+    // 60 unlocked files scanned across all batches, exactly one meaningful
+    // skip (the locked file); "." / ".." noise does not count.
+    CHECK(result.files.size() == 60);
+    std::size_t meaningful = 0;
+    for (const SkippedEntry& entry : result.skipped) {
+        if (entry.reason != SkipReason::ReservedName) {
+            ++meaningful;
+        }
+    }
+    REQUIRE(meaningful == 1);
+    const auto* locked = find_skipped(result, "iso-file-000-locked.dat");
+    REQUIRE(locked != nullptr);
+    CHECK(locked->reason == SkipReason::InUse);
+}
+
 TEST_CASE("scanner preserves unicode names, dots and extension-less names") {
     fixture::SandboxDir dir{"scan-names"};
     const std::wstring unicode_doc = L"\x6587\x4EF6\x5939\x62A5\x544A.txt"; // 文件夹报告.txt
