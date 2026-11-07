@@ -233,4 +233,31 @@ struct SourceInspection {
 
 SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name);
 
+// ---------------------------------------------------------------------------
+// Destination category directory inspection (Phase 4, read-only).
+// Opens `utf8_name` as a SINGLE component relative to `root_handle`
+// (FILE_OPEN, never creates), inspecting the leaf WITHOUT following reparse
+// points. Minimum access: FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES |
+// SYNCHRONIZE - no movement permissions are requested. On success the
+// immediate entries are enumerated (handle-based) into existing_names;
+// every name counts as a potential collision, and nothing is ever entered
+// or modified. The directory handle is closed before returning.
+// ---------------------------------------------------------------------------
+enum class CategoryDirStatus {
+    Safe,           // genuine directory, attributes clean, enumerated
+    Missing,        // confirmed not-found (the only absence signal)
+    Unsafe,         // reparse/hidden/system leaf, or name exists as a file
+    Uninspectable,  // open or enumeration failed for another reason
+};
+
+struct CategoryDirInspection {
+    CategoryDirStatus status = CategoryDirStatus::Uninspectable;
+    std::string detail;                    // human-readable reason
+    unsigned long native_code = 0;         // NTSTATUS/Win32 code when relevant
+    std::vector<std::string> existing_names; // UTF-8 snapshot; Safe only
+};
+
+CategoryDirInspection inspect_category_directory(HANDLE root_handle,
+                                                 std::string_view utf8_name);
+
 } // namespace folderpilot::platform

@@ -1,12 +1,13 @@
 # FolderPilot — Architecture
 
-> **Implementation status: Phase 3 (PathGuard & scanner) complete.**
+> **Implementation status: Phase 4 (planner & dry-run) complete.**
 > This document records the architecture approved in Engineering Plan v2.5
 > (plus the ratified directory-enumeration mechanism). Only items marked
 > **IMPLEMENTED** exist in code today. Everything else is **PLANNED — NOT YET
-> IMPLEMENTED**. FolderPilot can classify filenames in memory, validate a
-> target directory, and enumerate its immediate files — strictly read-only.
-> It still cannot plan, organize, or move any files.
+> IMPLEMENTED**. FolderPilot can validate a target, scan it, classify the
+> files, inspect destination categories, plan the organization, and print a
+> read-only dry-run report — via `folderpilot <directory>`. It still cannot
+> move, create, or delete anything; `--apply` is explicitly rejected.
 
 ---
 
@@ -26,9 +27,12 @@
 | Directory scanner: handle-anchored enumeration, non-recursive, structured skip reasons | **IMPLEMENTED** (Phase 3) |
 | Source identity capture from opened handles (`FileIdInfo` + separate legacy fallback) | **IMPLEMENTED** (Phase 3) |
 | Platform layer: native file handling (`NtCreateFile`, runtime-resolved ntdll functions) | **IMPLEMENTED** (Phase 3, bootstrap + source opens) |
-| Planner, collision resolution, reporter | PLANNED — NOT YET IMPLEMENTED (Phase 4) |
+| Destination category inspection (root-relative, read-only, snapshot of existing names) | **IMPLEMENTED** (Phase 4) |
+| Collision resolution during planning (reserved natural names, bounded suffixes) | **IMPLEMENTED** (Phase 4) |
+| Immutable `OrganizationPlan` with validated invariants | **IMPLEMENTED** (Phase 4) |
+| Dry-run Reporter (render-only, no filesystem access) | **IMPLEMENTED** (Phase 4) |
+| Read-only CLI (`folderpilot <dir>`, `--help`, `--version`; `--apply` explicitly rejected) | **IMPLEMENTED** (Phase 4) |
 | Executor, safe movement (`SetFileInformationByHandle`) | PLANNED — NOT YET IMPLEMENTED (Phase 5) |
-| Dry-run reporter, `--apply` executor | PLANNED — NOT YET IMPLEMENTED (Phases 4–5) |
 | Dry-run reporter, `--apply` executor | PLANNED — NOT YET IMPLEMENTED (Phases 4–5) |
 | Any file organization behavior | PLANNED — NOT YET IMPLEMENTED |
 
@@ -113,6 +117,10 @@ Safety invariants and their wording constraints: see
   `test_path_guard` (pure denylist + sandboxed bootstrap),
   `test_scanner` (sandboxed integration) with fixture helpers in
   `phase3_fixture.*`.
+- Phase 4 suites: `test_collision` (pure resolver), `test_planner`
+  (pure invariants + sandboxed planning), `test_reporter` (render-only),
+  `test_cli` (spawns the real executable; read-only dry-run immutability,
+  `--apply` rejection, exit codes).
 - Phase 3 filesystem fixtures live exclusively under
   `build/phase3-test-sandbox/` (never `%TEMP%`, never user folders); cleanup
   removes only the verified fixture directory. Capability-gated tests
@@ -128,9 +136,51 @@ Safety invariants and their wording constraints: see
 | 1 | Project scaffold and build system | **IMPLEMENTED** |
 | 2 | Core types and classification | **IMPLEMENTED** |
 | 3 | PathGuard and directory scanner | **IMPLEMENTED** |
-| 4 | Planner and dry-run | PLANNED |
+| 4 | Planner and dry-run | **IMPLEMENTED** |
 | 5 | Safe executor | PLANNED |
 | 6 | Hardening, tests and documentation | PLANNED |
+
+## 10. Phase 4 implementation notes (IMPLEMENTED)
+
+- **Workflow**: SCAN → CLASSIFY → INSPECT DESTINATIONS → PLAN → REPORT.
+  The CLI runs exactly this pipeline read-only and exits; nothing is ever
+  created, moved, or deleted, and `--apply` is rejected with an explicit
+  message and a non-zero exit code.
+- **Destination category inspection**: each of the seven category folders is
+  opened relative to the retained root handle (`NtCreateFile` with
+  `RootDirectory`, `FILE_OPEN`, `FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT`),
+  minimum access (`FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE`),
+  leaf un-followed, handle closed after inspection. Safe categories get a
+  full name snapshot (every entry counts as a collision, including hidden,
+  system, reparse, and directories); only a confirmed not-found classifies a
+  category as Missing (never created in Phase 4); anything else is Unsafe or
+  Uninspectable and receives zero planned moves, without aborting safe
+  categories.
+- **Collision resolution** happens entirely during planning, per category:
+  all incoming natural names are reserved FIRST (a generated suffix can
+  never steal another incoming file's natural destination), then each
+  candidate takes its natural name if free or the first free `name (n)ext`
+  candidate, matching ordinally case-insensitively against the destination
+  snapshot, all reservations, and earlier allocations. Compound extensions
+  (`.tar.gz` …), dotfiles, and extensionless names keep their full shape;
+  suffix attempts are bounded (default 100) and exhaustion is reported as
+  `CollisionExhausted` — never an unbounded search, never an invented
+  alternative directory.
+- **The plan is immutable**: private storage, no mutators, read-only
+  accessors; invariants (single-component destinations, pairwise-unique
+  destinations, category agreement, no unsafe-category targets, no conflicts
+  with existing entries) are validated before publication; an invalid plan
+  is rejected whole (fail closed) instead of published partially.
+- **Reporter** is render-only: it consumes the plan and prints target,
+  resolved path, per-category sections marked "existing" or
+  "will be created", skip reasons, collision-resolved names, summary counts,
+  and the NO FILES WERE MOVED / NO DIRECTORIES WERE CREATED / NO FILES WERE
+  DELETED footer. Internal `.`/`..` noise is filtered from the user view.
+- **CLI exit codes**: 0 dry-run report · 1 usage error / unsupported feature
+  (`--apply`) · 2 target rejected · 3 scan or planning failure.
+  Known limitation (documented, deferred): CLI arguments use the ANSI entry
+  point, so non-ASCII directory arguments may not round-trip until the wide
+  entry point lands in a later phase.
 
 ## 9. Phase 3 implementation notes (IMPLEMENTED)
 

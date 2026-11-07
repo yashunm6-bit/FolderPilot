@@ -18,19 +18,23 @@ namespace folderpilot {
 
 // Structured skip reasons (never bare strings as identifiers).
 enum class SkipReason {
-    ReservedName,   // "." or ".." appeared in enumeration (defensive)
-    Directory,      // an existing subdirectory - never entered
-    ReparsePoint,   // junction, symlink or cloud placeholder (any tag)
-    Hidden,         // FILE_ATTRIBUTE_HIDDEN
-    System,         // FILE_ATTRIBUTE_SYSTEM
-    NotRegularFile, // no longer a regular file when opened
-    Vanished,       // disappeared between enumeration and opening
-    AccessDenied,   // the OS refused to open the entry
-    InUse,          // held by an incompatible existing handle
-    OpenFailed,     // open failed for another reason (code in the entry)
-    InvalidName,    // name is not a single safe component (defensive)
-    EncodingError,  // name is not valid UTF-8 round-trippable
-    Unsupported,    // identity capture unsupported on this filesystem
+    ReservedName,          // "." or ".." appeared in enumeration (defensive)
+    Directory,             // an existing subdirectory - never entered
+    ReparsePoint,          // junction, symlink or cloud placeholder (any tag)
+    Hidden,                // FILE_ATTRIBUTE_HIDDEN
+    System,                // FILE_ATTRIBUTE_SYSTEM
+    NotRegularFile,        // no longer a regular file when opened
+    Vanished,              // disappeared between enumeration and opening
+    AccessDenied,          // the OS refused to open the entry
+    InUse,                 // held by an incompatible existing handle
+    OpenFailed,            // open failed for another reason (code in the entry)
+    InvalidName,           // name is not a single safe component (defensive)
+    EncodingError,         // name is not valid UTF-8 round-trippable
+    Unsupported,           // identity capture unsupported on this filesystem
+    // Planning-phase reasons (Phase 4):
+    UnsafeCategory,        // destination category directory is unsafe for planning
+    CategoryUninspectable, // destination category could not be inspected
+    CollisionExhausted,    // no free destination name within the suffix limit
 };
 
 struct ScannedFile {

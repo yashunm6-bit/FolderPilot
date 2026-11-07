@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <vector>
 #include <string>
 
 namespace fixture {
@@ -58,5 +59,13 @@ using Snapshot = std::map<std::string, SnapshotEntry>; // relative UTF-8 path ->
 
 Snapshot take_snapshot(const std::filesystem::path& dir);
 bool snapshots_equal(const Snapshot& a, const Snapshot& b);
+
+// Spawns the built folderpilot.exe with the given arguments (each quoted
+// individually) and captures its exit code and stdout. TEST CODE ONLY.
+struct CliRun {
+    int exit_code = -1;
+    std::string output;
+};
+CliRun run_folderpilot_cli(const std::vector<std::wstring>& arguments);
 
 } // namespace fixture

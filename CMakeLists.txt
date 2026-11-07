@@ -54,6 +54,10 @@ add_library(folderpilot_core STATIC
     lib/folderpilot/classifier.cpp
     lib/folderpilot/path_guard.cpp
     lib/folderpilot/scanner.cpp
+    lib/folderpilot/collision_resolver.cpp
+    lib/folderpilot/organization_plan.cpp
+    lib/folderpilot/planner.cpp
+    lib/folderpilot/reporter.cpp
 )
 target_include_directories(folderpilot_core PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(folderpilot_core PUBLIC
@@ -83,7 +87,10 @@ add_executable(folderpilot
 target_compile_definitions(folderpilot PRIVATE
     FOLDERPILOT_VERSION="${PROJECT_VERSION}"
 )
-target_link_libraries(folderpilot PRIVATE folderpilot_build_options)
+target_link_libraries(folderpilot PRIVATE
+    folderpilot_build_options
+    folderpilot_core
+)
 
 # ---------------------------------------------------------------------------
 # Testing: CTest wiring; the test targets live in tests/.

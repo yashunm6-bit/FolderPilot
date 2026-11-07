@@ -682,4 +682,121 @@ bool identity_matches(const SourceIdentity& a, const SourceIdentity& b) {
            la.file_index_low == lb.file_index_low;
 }
 
+CategoryDirInspection inspect_category_directory(HANDLE root_handle,
+                                                 std::string_view utf8_name) {
+    CategoryDirInspection out;
+
+    if (root_handle == nullptr || utf8_name.empty() ||
+        utf8_name.find_first_of("/\\:") != std::string_view::npos ||
+        utf8_name == "." || utf8_name == "..") {
+        out.status = CategoryDirStatus::Uninspectable;
+        out.detail = "category name is not a single safe path component";
+        return out;
+    }
+    const auto wide = to_utf16(utf8_name);
+    if (!wide.ok) {
+        out.status = CategoryDirStatus::Uninspectable;
+        out.detail = "category name is not valid UTF-8: " + wide.error;
+        return out;
+    }
+    if (!native_apis().ok()) {
+        out.status = CategoryDirStatus::Uninspectable;
+        out.detail = "required ntdll functions are unavailable";
+        return out;
+    }
+
+    std::wstring name = std::move(wide.value);
+    UNICODE_STRING nt_name{};
+    nt_name.Length = static_cast<USHORT>(name.size() * sizeof(WCHAR));
+    nt_name.MaximumLength = nt_name.Length + sizeof(WCHAR);
+    nt_name.Buffer = name.data();
+
+    OBJECT_ATTRIBUTES oa{};
+    oa.Length = sizeof(oa);
+    oa.RootDirectory = root_handle; // anchored to the retained root object
+    oa.Attributes = OBJ_CASE_INSENSITIVE;
+    oa.ObjectName = &nt_name;
+    oa.SecurityDescriptor = nullptr;
+    oa.SecurityQualityOfService = nullptr;
+
+    IO_STATUS_BLOCK iosb{};
+    HANDLE raw_handle = nullptr;
+    const LONG status = native_apis().nt_create_file(
+        &raw_handle,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, // inspection only
+        &oa, &iosb, nullptr, 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, // no FILE_SHARE_DELETE: approved policy
+        FILE_OPEN,                          // never creates anything
+        FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        nullptr, 0);
+    if (status < 0) {
+        out.native_code = static_cast<unsigned long>(status);
+        if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_NOT_FOUND) {
+            out.status = CategoryDirStatus::Missing;
+            out.detail = "category directory does not exist";
+            return out;
+        }
+        if (status == STATUS_NOT_A_DIRECTORY) {
+            out.status = CategoryDirStatus::Unsafe;
+            out.detail = "a regular file with the category name already exists";
+            return out;
+        }
+        out.status = CategoryDirStatus::Uninspectable;
+        out.detail = ntstatus_message("NtCreateFile(category)", status);
+        return out;
+    }
+    unique_handle handle{raw_handle}; // closed before return
+
+    EntryAttributes attributes{};
+    if (const auto r = query_attribute_tag_info(handle.get(), attributes); !r.ok) {
+        out.status = CategoryDirStatus::Uninspectable;
+        out.native_code = r.native_code;
+        out.detail = r.error;
+        return out;
+    }
+    if (attributes.reparse_point()) {
+        out.status = CategoryDirStatus::Unsafe;
+        out.detail = "category directory is a reparse point";
+        return out;
+    }
+    if (attributes.hidden()) {
+        out.status = CategoryDirStatus::Unsafe;
+        out.detail = "category directory is hidden";
+        return out;
+    }
+    if (attributes.system()) {
+        out.status = CategoryDirStatus::Unsafe;
+        out.detail = "category directory is a system directory";
+        return out;
+    }
+    if (!attributes.directory()) {
+        out.status = CategoryDirStatus::Unsafe;
+        out.detail = "category name is not a directory";
+        return out;
+    }
+
+    // Snapshot every immediate name: hidden/system/reparse/directories all
+    // occupy filenames and therefore all count as collisions.
+    NativeResult enumeration{true, NativeFailure::Other, {}, 0};
+    enumeration = enumerate_immediate_children(handle.get(), 64 * 1024,
+        [&out](const RawDirEntry& entry) {
+            // Defensive: "." and ".." can never collide with a real filename.
+            if (entry.name == L"." || entry.name == L"..") {
+                return;
+            }
+            const auto narrow = to_utf8(entry.name);
+            if (narrow.ok) {
+                out.existing_names.push_back(narrow.value);
+            }
+        });
+    if (!enumeration.ok) {
+        out.status = CategoryDirStatus::Uninspectable;
+        out.detail = "category enumeration failed: " + enumeration.error;
+        return out;
+    }
+
+    out.status = CategoryDirStatus::Safe;
+    return out;
+}
+
 } // namespace folderpilot::platform

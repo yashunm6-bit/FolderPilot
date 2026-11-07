@@ -3,6 +3,7 @@
 #include "phase3_fixture.hpp"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -215,6 +216,72 @@ Snapshot take_snapshot(const std::filesystem::path& dir) {
 
 bool snapshots_equal(const Snapshot& a, const Snapshot& b) {
     return a == b;
+}
+
+CliRun run_folderpilot_cli(const std::vector<std::wstring>& arguments) {
+    CliRun run;
+
+    // Build the command line: quoted exe path, then one quoted argument each.
+    // Harness override: when a machine's WDAC/DeviceGuard policy blocks a
+    // freshly-linked binary, the gate can point the CLI tests at an already
+    // runnable build via the FOLDERPILOT_TEST_EXE_PATH environment variable.
+    // Any such deviation is disclosed in the phase report.
+    const char* override_path = std::getenv("FOLDERPILOT_TEST_EXE_PATH");
+    const std::wstring exe = folderpilot::platform::to_utf16(
+        override_path != nullptr ? std::string_view{override_path}
+                                 : std::string_view{FOLDERPILOT_EXE_PATH}).value;
+    std::wstring command = L"\"" + exe + L"\"";
+    for (const std::wstring& argument : arguments) {
+        command += L" \"" + argument + L"\"";
+    }
+
+    SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE stdout_read = nullptr;
+    HANDLE stdout_write = nullptr;
+    if (!::CreatePipe(&stdout_read, &stdout_write, &inherit, 0)) {
+        run.exit_code = -1;
+        run.output = "CreatePipe failed";
+        return run;
+    }
+    ::SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdOutput = stdout_write;
+    startup.hStdError = stdout_write;
+    PROCESS_INFORMATION process{};
+
+    std::wstring mutable_command = command;
+    const BOOL created = ::CreateProcessW(nullptr, mutable_command.data(), nullptr,
+                                          nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                          nullptr, &startup, &process);
+    ::CloseHandle(stdout_write); // child holds its own inherited copy now
+    if (created == 0) {
+        const DWORD error = ::GetLastError();
+        ::CloseHandle(stdout_read);
+        run.exit_code = -1;
+        run.output = "CreateProcessW failed (Windows error " + std::to_string(error) + ")";
+        return run;
+    }
+    ::CloseHandle(process.hThread);
+
+    // Drain the child's stdout, then wait for it to finish.
+    char chunk[4096];
+    DWORD read = 0;
+    for (;;) {
+        if (!::ReadFile(stdout_read, chunk, sizeof(chunk), &read, nullptr) || read == 0) {
+            break;
+        }
+        run.output.append(chunk, read);
+    }
+    ::WaitForSingleObject(process.hProcess, 30000);
+    DWORD exit_code = 0;
+    ::GetExitCodeProcess(process.hProcess, &exit_code);
+    run.exit_code = static_cast<int>(exit_code);
+    ::CloseHandle(process.hProcess);
+    ::CloseHandle(stdout_read);
+    return run;
 }
 
 } // namespace fixture

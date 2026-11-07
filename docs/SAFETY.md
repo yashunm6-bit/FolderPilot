@@ -1,11 +1,11 @@
 # FolderPilot — Safety Invariants
 
-> **STATUS: PARTIALLY IMPLEMENTED — read-only validation and scanning (Phase 3).**
+> **STATUS: PARTIALLY IMPLEMENTED — read-only planning and dry-run preview (Phase 4).**
 >
-> FolderPilot 0.1.0 can now validate a target directory (PathGuard) and
-> enumerate its immediate files through retained handles (Phase 3), strictly
-> read-only. There is still **no** planning, dry-run reporting, movement, or
-> any user-facing organization capability.
+> FolderPilot 0.1.0 can validate a target, scan it, inspect destination
+> categories, resolve collisions, and print a read-only dry-run report
+> (Phases 3–4). It still cannot move, create, or delete anything: `--apply`
+> is explicitly rejected with "File movement is not available in this build."
 >
 > This document records the architectural safety requirements ratified in
 > Engineering Plan v2.5. Each invariant below carries its own status marker;
@@ -15,17 +15,20 @@
 ---
 
 ## 1. Dry-run by default
-**PLANNED — NOT YET IMPLEMENTED**
+**IMPLEMENTED (Phase 4) for the preview; the mutation path itself arrives in Phase 5**
 Running the tool without `--apply` builds and displays an organization plan
 and performs no filesystem mutation whatsoever. Verified by a snapshot test
-that asserts directory state is byte-identical after a dry-run, including
-that no category directories are created.
+that asserts fixture state is unchanged after a complete CLI dry-run,
+including that missing category directories are not created. There is
+currently no code path that mutates user files at all.
 
 ## 2. Explicit authorization before moving files
-**PLANNED — NOT YET IMPLEMENTED**
-Files move only when the user explicitly passes `--apply`. The executor is
-unreachable without it, and the plan executed is exactly the immutable plan
-the executor was given — no destination names are invented at execution time.
+**PLANNED — NOT YET IMPLEMENTED (movement arrives in Phase 5); the `--apply` rejection is IMPLEMENTED (Phase 4)**
+Passing `--apply` today returns "File movement is not available in this
+build. No changes were made." with a non-zero exit code — it is never
+silently ignored. When the executor lands, files will move only through it,
+consuming exactly the immutable plan it was given — no destination names
+invented at execution time.
 
 ## 3. No file deletion in the product
 **HOLDS BY CONSTRUCTION (Phases 1–3); re-verified each phase**
@@ -94,13 +97,14 @@ after canonical-path verification. Tests never target the real Downloads
 folder, any user data, or `%TEMP%`.
 
 ## 12. Fail-closed behavior
-**IMPLEMENTED for validation and scanning (Phase 3); move-time behavior PLANNED (Phase 5)**
+**IMPLEMENTED for validation, scanning, and planning (Phases 3–4); move-time behavior PLANNED (Phase 5)**
 Invalid paths, missing targets, unreadable attributes, unverifiable volume
-identity, and all other unresolved states fail closed: the affected entry or
-the whole scan is reported as failed — never as an apparently successful
-empty result. One failing entry never aborts the batch. Exit codes:
-0 success/dry-run, 1 usage, 2 safety refusal, 3 completed with failures,
-4 aborted (mapping arrives with the CLI phases).
+identity, uninspectable categories, and all other unresolved states fail
+closed: the affected entry or category is skipped with a structured reason,
+an invalid plan is rejected whole, and a failed scan is never an apparently
+successful empty result. One failing entry or category never aborts
+independent work. Exit codes: 0 dry-run report, 1 usage/unsupported,
+2 target rejected, 3 scan or planning failure.
 
 ---
 
