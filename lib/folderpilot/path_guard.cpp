@@ -42,6 +42,8 @@ PathRejection map_platform_failure(platform::NativeFailure failure) {
         case platform::NativeFailure::DeletePending:     return PathRejection::SharingConflict;
         case platform::NativeFailure::Unsupported:       return PathRejection::UnsupportedPlatform;
         case platform::NativeFailure::IsADirectory:      return PathRejection::NotADirectory;
+        case platform::NativeFailure::Conflict:          return PathRejection::OtherError;
+        case platform::NativeFailure::CrossVolume:       return PathRejection::OtherError;
         case platform::NativeFailure::Other:             return PathRejection::OtherError;
     }
     return PathRejection::OtherError;

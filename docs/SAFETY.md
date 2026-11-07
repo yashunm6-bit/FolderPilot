@@ -1,11 +1,16 @@
 # FolderPilot — Safety Invariants
 
-> **STATUS: PARTIALLY IMPLEMENTED — read-only planning and dry-run preview (Phase 4).**
+> **STATUS: PARTIALLY IMPLEMENTED — planning, dry-run preview and the safe executor (Phases 3–5).**
 >
 > FolderPilot 0.1.0 can validate a target, scan it, inspect destination
-> categories, resolve collisions, and print a read-only dry-run report
-> (Phases 3–4). It still cannot move, create, or delete anything: `--apply`
-> is explicitly rejected with "File movement is not available in this build."
+> categories, resolve collisions, print a read-only dry-run report, and —
+> with explicit `--apply` — revalidate everything and move files through
+> validated handles with OS-enforced no-overwrite semantics (Phase 5).
+> KNOWN BLOCKER (disclosed): on OS build 26300 the RootDirectory-relative
+> rename form fails with ERROR_INVALID_PARAMETER, so movement currently
+> fails closed (sources untouched) on this build; no fallback was added.
+> There is still no deletion, no overwrite, no undo, and no recursive
+> organization.
 >
 > This document records the architectural safety requirements ratified in
 > Engineering Plan v2.5. Each invariant below carries its own status marker;
@@ -15,7 +20,7 @@
 ---
 
 ## 1. Dry-run by default
-**IMPLEMENTED (Phase 4) for the preview; the mutation path itself arrives in Phase 5**
+**IMPLEMENTED (Phases 4–5)**
 Running the tool without `--apply` builds and displays an organization plan
 and performs no filesystem mutation whatsoever. Verified by a snapshot test
 that asserts fixture state is unchanged after a complete CLI dry-run,
@@ -23,12 +28,11 @@ including that missing category directories are not created. There is
 currently no code path that mutates user files at all.
 
 ## 2. Explicit authorization before moving files
-**PLANNED — NOT YET IMPLEMENTED (movement arrives in Phase 5); the `--apply` rejection is IMPLEMENTED (Phase 4)**
-Passing `--apply` today returns "File movement is not available in this
-build. No changes were made." with a non-zero exit code — it is never
-silently ignored. When the executor lands, files will move only through it,
-consuming exactly the immutable plan it was given — no destination names
-invented at execution time.
+**IMPLEMENTED (Phase 5)**
+Files move only when the user explicitly passes `--apply`. The executor
+consumes exactly the immutable plan it was given — it never invents
+destination names, never re-plans, never retries. Without `--apply` the
+default dry-run prints the plan and changes nothing.
 
 ## 3. No file deletion in the product
 **HOLDS BY CONSTRUCTION (Phases 1–3); re-verified each phase**
@@ -37,7 +41,7 @@ within the selected root. `remove_all` exists exclusively in test-fixture
 cleanup. This is a review-enforced structural invariant.
 
 ## 4. No overwriting existing destinations
-**PLANNED — NOT YET IMPLEMENTED**
+**IMPLEMENTED (Phase 5, mechanism); blocked on OS build 26300 (see banner)**
 Movement uses `SetFileInformationByHandle(FileRenameInfo)` with
 `ReplaceIfExists = FALSE` — the operating system rejects an existing
 destination (`ERROR_ALREADY_EXISTS`). There is no path-based rename fallback.
@@ -73,7 +77,7 @@ locations are refused. The denylist is defense in depth, not a security
 boundary.
 
 ## 9. Root-relative filesystem operations
-**IMPLEMENTED for the bootstrap, enumeration, and source opens (Phase 3); category creation and movement PLANNED (Phases 4–5)**
+**IMPLEMENTED (Phases 3–5): bootstrap, enumeration, source opens, category revalidation/creation, and movement are all root-relative; NOTE the RootDirectory-relative RENAME form is blocked on OS build 26300 (banner)**
 Exactly one path-based bootstrap open establishes the validated root handle
 (reparse inspection, attributes, identity, resolved path all through that
 handle). Every subsequent source open is performed with `NtCreateFile`
@@ -82,7 +86,7 @@ captured at open time; identity re-verification against the plan arrives
 with the planner (Phase 4).
 
 ## 10. Source and destination handle protection
-**IMPLEMENTED for the open policy and identity capture (Phase 3); execution-window protection PLANNED (Phase 5)**
+**IMPLEMENTED (Phases 3 and 5): root/source/destination handles omit FILE_SHARE_DELETE, are identity-checked, and are retained through each movement**
 Retained root and source handles are opened **without** `FILE_SHARE_DELETE`:
 pre-existing DELETE-capable handles cause a safe acquisition failure, and
 while a handle is held, no normal user-mode process can rename or delete the
@@ -97,7 +101,13 @@ after canonical-path verification. Tests never target the real Downloads
 folder, any user data, or `%TEMP%`.
 
 ## 12. Fail-closed behavior
-**IMPLEMENTED for validation, scanning, and planning (Phases 3–4); move-time behavior PLANNED (Phase 5)**
+**IMPLEMENTED (Phases 3–5)**
+Validation, scanning, planning, and per-move execution all fail closed: a
+root identity mismatch aborts the batch before any mutation; a category
+replacement is never adopted; a moved-onto destination is rejected by the
+OS; one failing move never aborts independent moves. Exit codes: 0 dry-run
+report or fully successful execution, 1 usage, 2 target refused or batch
+aborted, 3 scan/plan failure or execution with partial failures.
 Invalid paths, missing targets, unreadable attributes, unverifiable volume
 identity, uninspectable categories, and all other unresolved states fail
 closed: the affected entry or category is skipped with a structured reason,

@@ -105,6 +105,8 @@ OrganizationPlan build_plan(const platform::RootDirectory& root,
             case platform::CategoryDirStatus::Safe:
                 status.state = CategoryDirectoryState::Safe;
                 status.existing_names = std::move(inspection.existing_names);
+                status.directory_identity = inspection.directory_identity;
+                status.has_directory_identity = inspection.has_directory_identity;
                 break;
             case platform::CategoryDirStatus::Missing:
                 status.state = CategoryDirectoryState::Missing;

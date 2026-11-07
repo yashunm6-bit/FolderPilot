@@ -41,6 +41,8 @@ enum class NativeFailure {
     DeletePending,       // target is pending deletion
     NotADirectory,       // a directory was required, a file was found
     IsADirectory,        // a file was required, a directory was found
+    Conflict,            // no-replace rename: the destination already exists
+    CrossVolume,         // the operation would cross a volume boundary
     Unsupported,         // required native capability unavailable on this system
     Other,               // anything else - always reported with a native code
 };
@@ -234,6 +236,65 @@ struct SourceInspection {
 SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name);
 
 // ---------------------------------------------------------------------------
+// Phase 5 executor primitives.
+// ---------------------------------------------------------------------------
+
+// Opens a source file relative to `root_handle` with the approved policy
+// (DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE; share R|W, no
+// FILE_SHARE_DELETE; FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT) and
+// queries attributes, identity, size and times through the opened handle.
+// Unlike inspect_source(), the handle is RETURNED and stays open: the
+// executor keeps it until the handle-based rename has completed. Close it
+// via the RAII member.
+struct SourceOpen {
+    bool ok = false;
+    NativeFailure failure = NativeFailure::Other;
+    std::string error;
+    unsigned long native_code = 0;
+    unique_handle handle;               // valid when ok
+    EntryAttributes attributes{};
+    SourceIdentity identity{};
+    long long size_bytes = 0;
+    long long last_write_time = 0;
+};
+SourceOpen open_source(HANDLE root_handle, std::string_view utf8_name);
+
+// Opens (or, when `create_if_missing`, creates) a destination category
+// directory relative to `root_handle`, and returns a retained RAII handle
+// after gating attributes and capturing identity.
+//   * existing mode (create_if_missing == false): FILE_OPEN; a confirmed
+//     not-found maps to ConfirmedNotFound (the category was deleted).
+//   * creation mode: FILE_CREATE only - a STATUS_OBJECT_NAME_COLLISION
+//     (category appeared after planning) is reported, never adopted.
+// Access (approved destination policy): FILE_ADD_FILE |
+// FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE; share R|W, no
+// FILE_SHARE_DELETE. Creation uses FILE_DIRECTORY_FILE |
+// FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT with
+// FILE_ATTRIBUTE_DIRECTORY, anchored to the root handle.
+struct CategoryDirOpen {
+    bool ok = false;
+    NativeFailure failure = NativeFailure::Other;
+    std::string error;
+    unsigned long native_code = 0;
+    unique_handle handle;               // valid when ok
+    EntryAttributes attributes{};
+    SourceIdentity identity{};
+    bool created = false;               // true when this call created it
+};
+CategoryDirOpen open_category_directory(HANDLE root_handle,
+                                        std::string_view utf8_name,
+                                        bool create_if_missing);
+
+// Handle-based, no-overwrite rename of an OPEN source file into a validated
+// destination directory: SetFileInformationByHandle(FileRenameInfo) with
+// ReplaceIfExists = FALSE, RootDirectory = destination handle, and a
+// relative single-component destination name built into a correctly sized
+// variable-length buffer (offsetof header, checked arithmetic, exact UTF-16
+// byte length, no terminator). The OS rejects an existing destination.
+NativeResult rename_to_category(HANDLE source_handle, HANDLE destination_dir,
+                                std::string_view destination_name);
+
+// ---------------------------------------------------------------------------
 // Destination category directory inspection (Phase 4, read-only).
 // Opens `utf8_name` as a SINGLE component relative to `root_handle`
 // (FILE_OPEN, never creates), inspecting the leaf WITHOUT following reparse
@@ -255,6 +316,8 @@ struct CategoryDirInspection {
     std::string detail;                    // human-readable reason
     unsigned long native_code = 0;         // NTSTATUS/Win32 code when relevant
     std::vector<std::string> existing_names; // UTF-8 snapshot; Safe only
+    SourceIdentity directory_identity{};   // captured through the handle; Safe only
+    bool has_directory_identity = false;
 };
 
 CategoryDirInspection inspect_category_directory(HANDLE root_handle,

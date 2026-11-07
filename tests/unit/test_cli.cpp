@@ -37,17 +37,37 @@ TEST_CASE("CLI dry-run prints the report and changes nothing") {
     CHECK_FALSE(std::filesystem::exists(dir.path() / L"Images"));
 }
 
-TEST_CASE("CLI rejects --apply explicitly without touching anything") {
+TEST_CASE("CLI --apply performs real movement inside the sandbox") {
+    // Phase 5 supersedes the Phase 4 rejection test: --apply is now the
+    // explicit authorization for movement (this fixture is synthetic and
+    // sandbox-confined). On OS builds where the approved RootDirectory-
+    // relative rename is blocked (ERROR_INVALID_PARAMETER), the CLI must
+    // fail safely: exit 3, sources untouched, nothing overwritten.
     SandboxDir dir{"cli-apply"};
-    REQUIRE(create_file(dir.path(), L"resume.pdf", "r"));
+    REQUIRE(create_file(dir.path(), L"resume.pdf", "resume-bytes"));
+    REQUIRE(create_file(dir.path(), L"photo.jpg", "photo-bytes"));
 
-    const auto before = take_snapshot(dir.path());
     const auto run = run_folderpilot_cli({wide_path(dir), L"--apply"});
-    CHECK(run.exit_code != 0);
-    CHECK(run.output.find("File movement is not available in this build. "
-                          "No changes were made.") != std::string::npos);
-    const auto after = take_snapshot(dir.path());
-    CHECK(snapshots_equal(before, after));
+    CHECK(run.output.find("EXECUTION REPORT") != std::string::npos);
+    CHECK(run.output.find("Batch execution is not transactional") != std::string::npos);
+
+    if (root_relative_rename_supported()) {
+        CHECK(run.exit_code == 0);
+        CHECK(run.output.find("resume.pdf -> Documents/resume.pdf: Moved") != std::string::npos);
+        CHECK(run.output.find("photo.jpg -> Images/photo.jpg: Moved") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(dir.path() / L"resume.pdf"));
+        CHECK_FALSE(std::filesystem::exists(dir.path() / L"photo.jpg"));
+        CHECK(std::filesystem::exists(dir.path() / L"Documents" / L"resume.pdf"));
+        CHECK(std::filesystem::exists(dir.path() / L"Images" / L"photo.jpg"));
+    } else {
+        // Blocked-OS path: every move fails safely, sources untouched.
+        CHECK(run.exit_code == 3);
+        CHECK(run.output.find(": Failed") != std::string::npos);
+        CHECK(run.output.find("Execution completed with partial failures.") != std::string::npos);
+        CHECK(std::filesystem::exists(dir.path() / L"resume.pdf"));
+        CHECK(std::filesystem::exists(dir.path() / L"photo.jpg"));
+        CHECK_FALSE(std::filesystem::exists(dir.path() / L"Documents" / L"resume.pdf"));
+    }
 }
 
 TEST_CASE("CLI refuses a missing target with the safety exit code") {

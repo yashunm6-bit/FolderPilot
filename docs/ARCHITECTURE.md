@@ -1,13 +1,14 @@
 # FolderPilot — Architecture
 
-> **Implementation status: Phase 4 (planner & dry-run) complete.**
+> **Implementation status: Phase 5 (safe executor) complete.**
 > This document records the architecture approved in Engineering Plan v2.5
 > (plus the ratified directory-enumeration mechanism). Only items marked
 > **IMPLEMENTED** exist in code today. Everything else is **PLANNED — NOT YET
 > IMPLEMENTED**. FolderPilot can validate a target, scan it, classify the
-> files, inspect destination categories, plan the organization, and print a
-> read-only dry-run report — via `folderpilot <directory>`. It still cannot
-> move, create, or delete anything; `--apply` is explicitly rejected.
+> files, plan the organization, print a read-only dry-run report, and — with
+> the explicit `--apply` flag — execute the planned movements through
+> validated handles with OS-enforced no-overwrite semantics. Undo, retries,
+> and recursive organization remain out of scope.
 
 ---
 
@@ -32,7 +33,12 @@
 | Immutable `OrganizationPlan` with validated invariants | **IMPLEMENTED** (Phase 4) |
 | Dry-run Reporter (render-only, no filesystem access) | **IMPLEMENTED** (Phase 4) |
 | Read-only CLI (`folderpilot <dir>`, `--help`, `--version`; `--apply` explicitly rejected) | **IMPLEMENTED** (Phase 4) |
-| Executor, safe movement (`SetFileInformationByHandle`) | PLANNED — NOT YET IMPLEMENTED (Phase 5) |
+| Root revalidation (identity/path/volume) before any mutation | **IMPLEMENTED** (Phase 5) |
+| Category revalidation + root-relative category creation (`FILE_CREATE`) | **IMPLEMENTED** (Phase 5) |
+| Source revalidation + identity compare + volume guard per move | **IMPLEMENTED** (Phase 5) |
+| Handle-based no-overwrite movement (`FileRenameInfo`, ReplaceIfExists=FALSE) | **IMPLEMENTED** (mechanism; blocked on OS build 26300, see §11) |
+| ExecutionResult + execution report (partial-failure semantics) | **IMPLEMENTED** (Phase 5) |
+| Undo, retries, recursive organization | PLANNED — NOT YET IMPLEMENTED (Phase 6+) |
 | Dry-run reporter, `--apply` executor | PLANNED — NOT YET IMPLEMENTED (Phases 4–5) |
 | Any file organization behavior | PLANNED — NOT YET IMPLEMENTED |
 
@@ -137,7 +143,7 @@ Safety invariants and their wording constraints: see
 | 2 | Core types and classification | **IMPLEMENTED** |
 | 3 | PathGuard and directory scanner | **IMPLEMENTED** |
 | 4 | Planner and dry-run | **IMPLEMENTED** |
-| 5 | Safe executor | PLANNED |
+| 5 | Safe executor | **IMPLEMENTED** (movement blocked on OS build 26300, see §11) |
 | 6 | Hardening, tests and documentation | PLANNED |
 
 ## 10. Phase 4 implementation notes (IMPLEMENTED)
@@ -261,3 +267,37 @@ Safety invariants and their wording constraints: see
   nuance: with explicit (non `-1`) source lengths, the size query and the
   conversion both return exactly the converted count — no terminator is
   appended or counted.
+
+## 11. Phase 5 implementation notes (IMPLEMENTED) and OS finding
+
+- **Executor flow**: plan validation -> fresh PathGuard bootstrap -> root
+  identity/path/volume comparison against the plan (any mismatch aborts the
+  whole batch with RootChanged BEFORE any mutation) -> per-category
+  revalidation (Safe: re-open + identity compare, replacement/deletion is
+  DestinationChanged; Missing: root-relative `FILE_CREATE` creation, a
+  collision is DestinationChanged, never adopted) -> per-move source
+  revalidation (open relative to the retained root, attribute gate, identity
+  compare, volume-serial guard) -> handle-based rename ->
+  per-move structured outcome.
+- **Movement**: `SetFileInformationByHandle(FileRenameInfo)` with
+  `ReplaceIfExists = FALSE`, `RootDirectory` = validated category handle,
+  relative single-component name, variable-length buffer sized
+  `sizeof(FILE_RENAME_INFO) + name_bytes` (see the contract note below).
+  No path-based rename exists anywhere; no fallback.
+- **OS FINDING (build 26300, disclosed)**: the RootDirectory-relative form
+  of `FileRenameInfo` fails with ERROR_INVALID_PARAMETER (87) for every
+  handle/flag/size/null convention probed (12+ combinations, evidence in
+  the test suite), while absolute-path forms succeed. The approved
+  root-relative movement mechanism is therefore BLOCKED on this OS build.
+  Per the gate rules no absolute-path fallback was implemented; movement
+  tests are capability-gated and report explicit SKIPPED reasons (9 cases).
+  The executor fails closed: every move reports Failed, sources and
+  destinations stay untouched, directories created before the block remain
+  (documented in the execution report).
+- **Contract correction found by the probe**: the FILE_RENAME_INFO buffer
+  must be at least `sizeof(FILE_RENAME_INFO) + FileNameLength` bytes - a
+  plain `offsetof(FileName) + bytes` buffer is rejected with 87 even for
+  absolute-path renames. The rename buffer sizing was fixed accordingly.
+- **CLI**: `--apply` executes the plan; exit 0 all moved, exit 3 partial
+  failures, exit 2 safety abort (RootChanged/invalid plan). Dry-run remains
+  the default and remains mutation-free.

@@ -6,13 +6,16 @@ FolderPilot will sort the files of a user-selected directory into category
 folders (Documents, Images, Videos, Audio, Archives, Code, Other) — showing a
 dry-run plan by default and moving files only on an explicit `--apply`.
 
-## Status: Phase 3 — safe target validation & scanning
+## Status: Phase 5 — safe executor (movement blocked on OS build 26300)
 
-Phase 1 delivered the build/test foundation; Phase 2 added the pure
-in-memory classification core and strict UTF-8/UTF-16 conversion; Phase 3
-added PathGuard (target validation) and a handle-anchored, non-recursive
-directory scanner — strictly read-only.
-**FolderPilot cannot plan, organize, or move any files yet.**
+Phases 1-3 delivered the build/test foundation, the classification core,
+PathGuard and the handle-anchored scanner; Phase 4 added planning and
+read-only dry-run previews; Phase 5 added the safe executor (`--apply`):
+root/destination/source revalidation and handle-based, OS-enforced
+no-overwrite movement.
+**KNOWN BLOCKER: on Windows build 26300 the RootDirectory-relative rename
+form fails with ERROR_INVALID_PARAMETER, so movements currently fail closed
+on this build (sources untouched). No path-based fallback exists by design.**
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — approved design, and which
   parts are implemented vs. planned.

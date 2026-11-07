@@ -100,7 +100,8 @@ TEST_CASE("error mapping follows the v2.2 taxonomy") {
     CHECK(classify_ntstatus(0xC00000BA) == NativeFailure::IsADirectory);      // FILE_IS_A_DIRECTORY
     CHECK(classify_ntstatus(0xC0000033) == NativeFailure::InvalidPath);       // OBJECT_NAME_INVALID
     CHECK(classify_ntstatus(0xC000000D) == NativeFailure::InvalidPath);       // INVALID_PARAMETER
-    CHECK(classify_ntstatus(0xC0000035) == NativeFailure::Other);             // NAME_COLLISION: unmapped
+    CHECK(classify_ntstatus(0xC0000035) == NativeFailure::Conflict);          // NAME_COLLISION (Phase 5 taxonomy)
+    CHECK(classify_ntstatus(0xC00000D4) == NativeFailure::CrossVolume);       // NOT_SAME_DEVICE
     CHECK(classify_ntstatus(0xE0001234) == NativeFailure::Other);             // unknown error severity
 }
 

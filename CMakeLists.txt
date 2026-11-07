@@ -39,6 +39,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         target_compile_definitions(folderpilot_build_options INTERFACE
             _WIN32_WINNT=0x0A00
             WINVER=0x0A00
+            NTDDI_VERSION=0x0A00000B
             NOMINMAX
         )
     endif()
@@ -58,6 +59,7 @@ add_library(folderpilot_core STATIC
     lib/folderpilot/organization_plan.cpp
     lib/folderpilot/planner.cpp
     lib/folderpilot/reporter.cpp
+    lib/folderpilot/executor.cpp
 )
 target_include_directories(folderpilot_core PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(folderpilot_core PUBLIC

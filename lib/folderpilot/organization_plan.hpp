@@ -47,10 +47,19 @@ struct CategoryStatus {
     CategoryDirectoryState state = CategoryDirectoryState::Uninspectable;
     std::string detail;                       // reason for Unsafe/Uninspectable
     std::vector<std::string> existing_names;  // destination snapshot; Safe only
+    // Directory identity captured through the opened handle during planning
+    // (Safe categories only). The executor compares it against the live
+    // directory identity to detect replacement after planning.
+    platform::SourceIdentity directory_identity{};
+    bool has_directory_identity = false;
 };
 
 class OrganizationPlan {
 public:
+    // Default-constructed plans are invalid (empty); only the planner's
+    // friend function can produce a valid one. There are no mutators.
+    OrganizationPlan() = default;
+
     // Read-only accessors. There are deliberately no mutators.
     bool valid() const { return valid_; }
     const std::string& error() const { return error_; }
@@ -71,8 +80,6 @@ public:
 private:
     friend OrganizationPlan build_plan(const platform::RootDirectory&,
                                        const ScanResult&, const PlanOptions&);
-
-    OrganizationPlan() = default;
 
     bool valid_ = false;
     std::string error_;

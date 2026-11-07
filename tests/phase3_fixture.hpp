@@ -15,12 +15,17 @@
 
 namespace fixture {
 
-// RAII test directory: build/phase3-test-sandbox/<name>-<counter>.
+// RAII test directory: build/<sandbox>/<name>-<counter>.
 // The destructor removes ONLY this directory, after verifying (via its
 // canonical path) that it really is inside the sandbox.
+enum class SandboxRoot {
+    Phase3, // build/phase3-test-sandbox/  (read-only phase fixtures)
+    Phase5, // build/phase5-test-sandbox/  (movement fixtures)
+};
+
 class SandboxDir {
 public:
-    explicit SandboxDir(const std::string& name);
+    explicit SandboxDir(const std::string& name, SandboxRoot root = SandboxRoot::Phase3);
     ~SandboxDir();
     SandboxDir(const SandboxDir&) = delete;
     SandboxDir& operator=(const SandboxDir&) = delete;
@@ -30,6 +35,7 @@ public:
     std::string u8() const;
 
 private:
+    SandboxDir(const std::string& name, const std::filesystem::path& base);
     std::filesystem::path sandbox_root_;
     std::filesystem::path path_;
 };
@@ -59,6 +65,16 @@ using Snapshot = std::map<std::string, SnapshotEntry>; // relative UTF-8 path ->
 
 Snapshot take_snapshot(const std::filesystem::path& dir);
 bool snapshots_equal(const Snapshot& a, const Snapshot& b);
+
+// Returns true when the file exists and its bytes equal  exactly.
+bool file_content_matches(const std::filesystem::path& p, const std::string& expected);
+
+// One-time capability probe (cached): does the approved RootDirectory-
+// relative handle rename work on this OS build? On build 26300 it returns
+// ERROR_INVALID_PARAMETER for every RootDirectory-relative form while
+// absolute paths succeed - the approved mechanism is BLOCKED there.
+bool root_relative_rename_supported();
+extern const char kMovementSkipReason[];
 
 // Spawns the built folderpilot.exe with the given arguments (each quoted
 // individually) and captures its exit code and stdout. TEST CODE ONLY.

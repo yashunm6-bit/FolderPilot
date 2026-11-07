@@ -16,6 +16,8 @@ add_executable(folderpilot_tests
     unit/test_collision.cpp
     unit/test_planner.cpp
     unit/test_reporter.cpp
+    unit/test_executor.cpp
+    unit/test_cli5.cpp
     unit/test_cli.cpp
 )
 
@@ -36,6 +38,7 @@ target_link_libraries(folderpilot_tests PRIVATE
 # never %TEMP%, never any user folder.
 target_compile_definitions(folderpilot_tests PRIVATE
     FOLDERPILOT_PHASE3_SANDBOX="${CMAKE_BINARY_DIR}/phase3-test-sandbox"
+    FOLDERPILOT_PHASE5_SANDBOX="${CMAKE_BINARY_DIR}/phase5-test-sandbox"
     FOLDERPILOT_EXE_PATH="$<TARGET_FILE:folderpilot>"
 )
 

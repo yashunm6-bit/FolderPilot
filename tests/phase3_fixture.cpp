@@ -17,6 +17,7 @@
 #include <winioctl.h>
 
 #include "text.hpp"
+#include "folderpilot/path_guard.hpp"
 
 namespace fixture {
 
@@ -55,8 +56,22 @@ void remove_tree_link_safe(const std::filesystem::path& p) {
 
 } // namespace
 
-SandboxDir::SandboxDir(const std::string& name) {
-    sandbox_root_ = sandbox_base();
+SandboxDir::SandboxDir(const std::string& name, SandboxRoot root) {
+    std::filesystem::path base = sandbox_base();
+    if (root == SandboxRoot::Phase5) {
+        base = base.parent_path() / "phase5-test-sandbox";
+        std::error_code ec;
+        std::filesystem::create_directories(base, ec);
+    }
+    sandbox_root_ = base;
+    static std::atomic<int> counter{0};
+    path_ = sandbox_root_ / (name + "-" + std::to_string(counter.fetch_add(1)));
+    std::error_code ec;
+    std::filesystem::create_directories(path_, ec);
+}
+
+SandboxDir::SandboxDir(const std::string& name, const std::filesystem::path& base) {
+    sandbox_root_ = base;
     static std::atomic<int> counter{0};
     path_ = sandbox_root_ / (name + "-" + std::to_string(counter.fetch_add(1)));
     std::error_code ec;
@@ -216,6 +231,48 @@ Snapshot take_snapshot(const std::filesystem::path& dir) {
 
 bool snapshots_equal(const Snapshot& a, const Snapshot& b) {
     return a == b;
+}
+
+bool root_relative_rename_supported() {
+    static const bool supported = [] {
+        SandboxDir probe{"exec-capability", SandboxRoot::Phase5};
+        create_file(probe.path(), L"probe-src.txt", "x");
+        create_directory(probe.path(), std::wstring(L"Documents"));
+        const auto guard = folderpilot::validate_target(probe.u8());
+        if (!guard.ok) {
+            return false;
+        }
+        const auto src = folderpilot::platform::open_source(guard.root.get(), "probe-src.txt");
+        if (!src.ok) {
+            return false;
+        }
+        const auto cat = folderpilot::platform::open_category_directory(
+            guard.root.get(), "Documents", false);
+        if (!cat.ok) {
+            return false;
+        }
+        const auto renamed = folderpilot::platform::rename_to_category(
+            src.handle.get(), cat.handle.get(), "probe-dst.txt");
+        return renamed.ok;
+    }();
+    return supported;
+}
+
+const char kMovementSkipReason[] =
+    "SKIPPED: RootDirectory-relative rename returns ERROR_INVALID_PARAMETER "
+    "on this OS build - the approved movement mechanism is blocked";
+
+bool file_content_matches(const std::filesystem::path& p, const std::string& expected) {
+    HANDLE h = ::CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::string actual(expected.size(), char(0));
+    DWORD read = 0;
+    const BOOL ok = ::ReadFile(h, actual.data(), static_cast<DWORD>(expected.size() + 1), &read, nullptr);
+    ::CloseHandle(h);
+    return ok != 0 && read == expected.size() && actual == expected;
 }
 
 CliRun run_folderpilot_cli(const std::vector<std::wstring>& arguments) {

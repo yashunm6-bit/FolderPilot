@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #include "text.hpp"
@@ -109,6 +110,12 @@ NativeFailure classify_ntstatus(LONG status) {
     }
     if (status == STATUS_FILE_IS_A_DIRECTORY) {
         return NativeFailure::IsADirectory;
+    }
+    if (status == STATUS_OBJECT_NAME_COLLISION) {
+        return NativeFailure::Conflict;
+    }
+    if (status == STATUS_NOT_SAME_DEVICE) {
+        return NativeFailure::CrossVolume;
     }
     return NativeFailure::Other;
 }
@@ -568,8 +575,8 @@ RootOpenResult open_root(std::string_view utf8_path) {
 // Root-relative source opening + inspection.
 // ---------------------------------------------------------------------------
 
-SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name) {
-    SourceInspection out;
+SourceOpen open_source(HANDLE root_handle, std::string_view utf8_name) {
+    SourceOpen out;
 
     if (root_handle == nullptr) {
         out.failure = NativeFailure::Other;
@@ -660,7 +667,187 @@ SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name) 
     }
 
     out.ok = true;
+    out.handle = unique_handle{handle.release()};
     return out;
+}
+
+SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name) {
+    // Phase 3 compatibility: same pipeline, but the handle is closed before
+    // returning (the scanner never keeps source handles).
+    const SourceOpen opened = open_source(root_handle, utf8_name);
+    SourceInspection out;
+    out.ok = opened.ok;
+    out.failure = opened.failure;
+    out.error = opened.error;
+    out.native_code = opened.native_code;
+    out.attributes = opened.attributes;
+    out.identity = opened.identity;
+    out.size_bytes = opened.size_bytes;
+    out.last_write_time = opened.last_write_time;
+    return out; // opened's RAII handle closes here
+}
+
+
+CategoryDirOpen open_category_directory(HANDLE root_handle,
+                                        std::string_view utf8_name,
+                                        bool create_if_missing) {
+    CategoryDirOpen out;
+
+    if (root_handle == nullptr || utf8_name.empty() ||
+        utf8_name.find_first_of("/\\:") != std::string_view::npos ||
+        utf8_name == "." || utf8_name == "..") {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "category name is not a single safe path component";
+        return out;
+    }
+    const auto wide = to_utf16(utf8_name);
+    if (!wide.ok) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "category name is not valid UTF-8: " + wide.error;
+        return out;
+    }
+    if (!native_apis().ok()) {
+        out.failure = NativeFailure::Unsupported;
+        out.error = "required ntdll functions are unavailable";
+        return out;
+    }
+
+    std::wstring name = std::move(wide.value);
+    UNICODE_STRING nt_name{};
+    nt_name.Length = static_cast<USHORT>(name.size() * sizeof(WCHAR));
+    nt_name.MaximumLength = nt_name.Length + sizeof(WCHAR);
+    nt_name.Buffer = name.data();
+
+    OBJECT_ATTRIBUTES oa{};
+    oa.Length = sizeof(oa);
+    oa.RootDirectory = root_handle; // anchored to the retained root object
+    oa.Attributes = OBJ_CASE_INSENSITIVE;
+    oa.ObjectName = &nt_name;
+    oa.SecurityDescriptor = nullptr;
+    oa.SecurityQualityOfService = nullptr;
+
+    IO_STATUS_BLOCK iosb{};
+    HANDLE raw_handle = nullptr;
+    const LONG status = native_apis().nt_create_file(
+        &raw_handle,
+        FILE_ADD_FILE | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE, // approved destination policy
+        &oa, &iosb,
+        nullptr,                                    // allocation size (create)
+        create_if_missing ? FILE_ATTRIBUTE_DIRECTORY : 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,         // no FILE_SHARE_DELETE
+        create_if_missing ? FILE_CREATE : FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        nullptr, 0);
+    if (status < 0) {
+        out.native_code = static_cast<unsigned long>(status);
+        if (create_if_missing && status == STATUS_OBJECT_NAME_COLLISION) {
+            // The category appeared after planning - never adopt it silently.
+            out.failure = NativeFailure::Conflict;
+            out.error = "category directory appeared after planning "
+                        "(run a fresh dry-run before trying again)";
+            return out;
+        }
+        out.failure = classify_ntstatus(status);
+        out.error = ntstatus_message(
+            create_if_missing ? "NtCreateFile(category create)" : "NtCreateFile(category open)",
+            status);
+        return out;
+    }
+    unique_handle handle{raw_handle};
+    out.created = create_if_missing;
+
+    if (const auto r = query_attribute_tag_info(handle.get(), out.attributes); !r.ok) {
+        out.failure = r.failure;
+        out.native_code = r.native_code;
+        out.error = r.error;
+        return out;
+    }
+    if (!out.attributes.directory() || out.attributes.reparse_point() ||
+        out.attributes.hidden() || out.attributes.system()) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "category directory is not a genuine, clean directory";
+        return out;
+    }
+    if (const auto r = capture_identity(handle.get(), out.identity); !r.ok) {
+        out.failure = r.failure;
+        out.native_code = r.native_code;
+        out.error = r.error;
+        return out;
+    }
+
+    out.ok = true;
+    out.handle = unique_handle{handle.release()};
+    return out;
+}
+
+NativeResult rename_to_category(HANDLE source_handle, HANDLE destination_dir,
+                                std::string_view destination_name) {
+    if (source_handle == nullptr || destination_dir == nullptr) {
+        return {false, NativeFailure::Other, "source or destination handle is not valid", 0};
+    }
+    if (destination_name.empty() || destination_name == "." || destination_name == ".." ||
+        destination_name.find_first_of("/\\:") != std::string_view::npos) {
+        return {false, NativeFailure::InvalidPath,
+                "destination name is not a single safe path component", 0};
+    }
+    // NTFS/ReFS component limit: 255 UTF-16 code units. Enforced here so the
+    // failure is explicit and classified instead of an OS error 206.
+    {
+        const auto wide_check = to_utf16(destination_name);
+        if (!wide_check.ok || wide_check.value.size() > 255) {
+            return {false, NativeFailure::InvalidPath,
+                    "destination name exceeds 255 UTF-16 code units", 0};
+        }
+    }
+    const auto wide = to_utf16(destination_name);
+    if (!wide.ok) {
+        return {false, NativeFailure::InvalidPath,
+                "destination name is not valid UTF-8: " + wide.error, 0};
+    }
+
+    // Variable-length FILE_RENAME_INFO buffer (Engineering Plan v2.2 s1,
+    // corrected by the Phase 5 contract probe): the API requires the buffer
+    // to be at least sizeof(FILE_RENAME_INFO) + FileNameLength bytes - the
+    // declared FileName[1] slot and padding are part of the consumed size,
+    // so a plain offsetof(header)+bytes buffer is too small and the call
+    // fails with ERROR_INVALID_PARAMETER. Header offset via offsetof;
+    // checked arithmetic; one aligned allocation; exact UTF-16 byte length
+    // WITHOUT a terminator in FileNameLength; ReplaceIfExists = FALSE.
+    constexpr std::size_t kHeader = offsetof(FILE_RENAME_INFO, FileName);
+    if (wide.value.size() > (std::numeric_limits<DWORD>::max)() / sizeof(WCHAR) ||
+        sizeof(FILE_RENAME_INFO) >
+            (std::numeric_limits<DWORD>::max)() - wide.value.size() * sizeof(WCHAR)) {
+        return {false, NativeFailure::InvalidPath,
+                "destination name exceeds the maximum representable length", 0};
+    }
+    const DWORD name_bytes = static_cast<DWORD>(wide.value.size() * sizeof(WCHAR));
+    const std::size_t total = sizeof(FILE_RENAME_INFO) + name_bytes;
+
+    std::vector<std::byte> buffer(total);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    info->ReplaceIfExists = FALSE;                        // OS-enforced no-overwrite
+    info->RootDirectory = destination_dir;                // validated category handle
+    info->FileNameLength = name_bytes;                    // exact UTF-16 byte count
+    std::memcpy(buffer.data() + kHeader, wide.value.data(), name_bytes);
+    *reinterpret_cast<wchar_t*>(buffer.data() + kHeader + name_bytes) = L'\0'; // slack, uncounted
+
+    if (!::SetFileInformationByHandle(source_handle, FileRenameInfo, buffer.data(),
+                                      static_cast<DWORD>(total))) {
+        const DWORD err = ::GetLastError();
+        NativeFailure failure = NativeFailure::Other;
+        if (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS) {
+            failure = NativeFailure::Conflict;            // OS-enforced no-overwrite
+        } else if (err == ERROR_NOT_SAME_DEVICE) {
+            failure = NativeFailure::CrossVolume;
+        } else if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION) {
+            failure = NativeFailure::SharingConflict;
+        } else if (err == ERROR_ACCESS_DENIED) {
+            failure = NativeFailure::AccessDenied;
+        }
+        return {false, failure,
+                win32_message("SetFileInformationByHandle(FileRenameInfo)", err), err};
+    }
+    return {true, NativeFailure::Other, {}, 0};
 }
 
 bool identity_matches(const SourceIdentity& a, const SourceIdentity& b) {
@@ -796,6 +983,12 @@ CategoryDirInspection inspect_category_directory(HANDLE root_handle,
     }
 
     out.status = CategoryDirStatus::Safe;
+    if (const auto r = capture_identity(handle.get(), out.directory_identity); r.ok) {
+        out.has_directory_identity = true;
+    }
+    // Identity capture failure does not make the directory unsafe for
+    // PLANNING (the snapshot is still valid); the executor fails closed
+    // when it cannot confirm the identity against the plan.
     return out;
 }
 

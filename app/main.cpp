@@ -1,15 +1,18 @@
-// FolderPilot - application entry point (Phase 4: read-only dry-run CLI).
+// FolderPilot - application entry point (Phase 5: dry-run + --apply).
 //
-// The default (and currently ONLY) operation is a read-only dry run:
-//   folderpilot <directory>
-// It validates the target, scans it, classifies the files, plans the
-// organization and prints the report - without changing anything.
+//   folderpilot <directory>            read-only dry run (default)
+//   folderpilot <directory> --apply    execute the planned movements
+//   folderpilot --help | --version
+//
+// The dry run never modifies anything. Actual movement happens only when
+// the user explicitly passes --apply; there is no confirmation prompt, no
+// background mode, and no --force.
 //
 // Exit codes:
-//   0  dry-run report printed
-//   1  usage error or unsupported feature (--apply)
-//   2  target rejected by the safety validation
-//   3  scan or planning failed
+//   0  dry-run report printed / execution completed with all moves done
+//   1  usage error
+//   2  safety rejection (target refused, root changed, invalid plan)
+//   3  scan or planning failed / execution completed with failures
 //
 // Known limitation (deferred to a later phase): command-line arguments are
 // read through the ANSI entry point, so non-ASCII directory arguments may
@@ -19,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include "folderpilot/executor.hpp"
 #include "folderpilot/path_guard.hpp"
 #include "folderpilot/planner.hpp"
 #include "folderpilot/reporter.hpp"
@@ -29,12 +33,14 @@ namespace {
 int print_usage() {
     std::cout <<
         "Usage:\n"
-        "  folderpilot <directory>    preview the organization plan (dry run)\n"
-        "  folderpilot --help         show this help\n"
-        "  folderpilot --version      show version information\n"
+        "  folderpilot <directory>           preview the organization plan (dry run)\n"
+        "  folderpilot <directory> --apply   execute the planned movements\n"
+        "  folderpilot --help                show this help\n"
+        "  folderpilot --version             show version information\n"
         "\n"
         "The default operation is always a read-only dry run:\n"
-        "nothing is moved, created, or deleted.\n";
+        "nothing is moved, created, or deleted.\n"
+        "File movement requires the explicit --apply flag.\n";
     return 1;
 }
 
@@ -44,6 +50,7 @@ int main(int argc, char** argv) {
     const std::vector<std::string> args(argv, argv + argc);
 
     std::string directory;
+    bool apply = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "--help") {
@@ -52,13 +59,12 @@ int main(int argc, char** argv) {
         }
         if (arg == "--version") {
             std::cout << "FolderPilot " << FOLDERPILOT_VERSION
-                      << " (dry-run preview build)\n";
+                      << " (dry-run + apply build)\n";
             return 0;
         }
         if (arg == "--apply") {
-            std::cout << "File movement is not available in this build. "
-                         "No changes were made.\n";
-            return 1;
+            apply = true;
+            continue;
         }
         if (!arg.empty() && arg[0] == '-') {
             std::cout << "Unknown option: " << arg << "\n";
@@ -95,10 +101,20 @@ int main(int argc, char** argv) {
     const auto plan = folderpilot::build_plan(guard.root, scan);
     if (!plan.valid()) {
         std::cout << "Planning failed: " << plan.error() << "\n";
-        return 3;
+        return 2;
     }
 
-    // 4. Print the read-only preview. Nothing was modified.
-    std::cout << folderpilot::render_dry_run_report(plan);
-    return 0;
+    if (!apply) {
+        // 4a. Read-only preview. Nothing is modified.
+        std::cout << folderpilot::render_dry_run_report(plan);
+        return 0;
+    }
+
+    // 4b. Explicitly authorized execution against the validated root.
+    const auto result = folderpilot::execute_plan(plan, directory);
+    std::cout << folderpilot::render_execution_report(plan, result);
+    if (result.aborted) {
+        return 2; // nothing was moved
+    }
+    return result.all_moved() ? 0 : 3;
 }

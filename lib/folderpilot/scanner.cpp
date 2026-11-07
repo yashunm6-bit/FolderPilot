@@ -37,6 +37,8 @@ SkipReason skip_reason_from(platform::NativeFailure failure) {
         case platform::NativeFailure::NotADirectory:     return SkipReason::NotRegularFile;
         case platform::NativeFailure::InvalidPath:       return SkipReason::InvalidName;
         case platform::NativeFailure::Unsupported:       return SkipReason::Unsupported;
+        case platform::NativeFailure::Conflict:          return SkipReason::OpenFailed;
+        case platform::NativeFailure::CrossVolume:       return SkipReason::OpenFailed;
         case platform::NativeFailure::Other:             return SkipReason::OpenFailed;
     }
     return SkipReason::OpenFailed;
