@@ -189,7 +189,11 @@ enum class DirParseStatus {
     TruncatedHeader,    // entry header does not fit in the buffer
     MisalignedEntry,    // NextEntryOffset is not an 8-byte multiple
     BadNameLength,      // FileNameLength is not an even number of bytes
+    ZeroLengthName,     // FileNameLength is zero: no legitimate directory
+                        // entry has an empty name; an all-zero header region
+                        // means the OS wrote nothing into the buffer
     NameOutOfBounds,    // filename bytes extend past the valid buffer region
+    OverlappingEntry,   // NextEntryOffset lands inside the current record
     EntryOutOfBounds,   // NextEntryOffset points past the valid region
 };
 
@@ -203,6 +207,65 @@ struct DirParseResult {
 // FileIdBothDirectoryInfo / FileIdBothDirectoryRestartInfo. Validates every
 // boundary before access; entries are never assumed null-terminated.
 DirParseResult parse_id_both_dir_entries(const unsigned char* data, std::size_t bytes);
+
+// ---------------------------------------------------------------------------
+// Enumeration completion/batch-limit contract (Phases 5.1.1/5.1.4, pure
+// helpers).
+// ---------------------------------------------------------------------------
+
+// Returns true when a FAILED GetFileInformationByHandleEx call is a
+// legitimate end of enumeration.
+//
+// The contract has three layers that must not be conflated:
+//
+// 1. Generic Win32 contract (GetFileInformationByHandleEx /
+//    FILE_ID_BOTH_DIR_INFO): success returns nonzero with records in the
+//    buffer; failure returns zero with GetLastError(); buffer contents are
+//    unspecified on failure and the number of bytes written is NOT reported
+//    (why every batch zero-fills first). The Win32 reference itself names
+//    no end-of-enumeration status, and class behavior "is subject to
+//    change between operating system releases".
+//
+// 2. MS-FSA "Directory Information Queries" statuses DO distinguish the
+//    query kind: when no records are returned, the INITIAL query
+//    (FirstQuery) is failed with STATUS_NO_SUCH_FILE, while a CONTINUATION
+//    query is failed with STATUS_NO_MORE_FILES (Win32 mappings:
+//    ERROR_FILE_NOT_FOUND and ERROR_NO_MORE_FILES). MS-FSA also makes
+//    "."/".." prefix records part of first/restart queries EXCEPT when the
+//    opened directory is the volume root (the volume-root exception);
+//    FolderPilot never enumerates a volume root (PathGuard rejects drive
+//    roots as targets) and skips any "."/".." entries as ReservedName
+//    regardless.
+//
+// 3. FolderPilot's decision: ONLY ERROR_NO_MORE_FILES is accepted as a
+//    legitimate end, for BOTH query kinds. ERROR_FILE_NOT_FOUND — although
+//    MS-FSA permits it for a zero-match initial query — is NOT adopted as
+//    an empty-directory result: FolderPilot enumerates ordinary local
+//    directories only (PathGuard rejects UNC share roots; volume roots are
+//    rejected as targets), where the observed terminal status is
+//    ERROR_NO_MORE_FILES, and a zero-match initial query on a directory
+//    that passed bootstrap more plausibly indicates the directory
+//    disappeared after bootstrap - a race. Failing closed turns that
+//    ambiguous state into a scan failure instead of an apparently
+//    successful empty result. Every other error also fails closed.
+bool is_legitimate_enumeration_end(unsigned long win32_error, bool initial_query);
+
+// The maximum number of GetFileInformationByHandleEx batches a single
+// enumeration may issue (defense in depth against a non-terminal
+// enumeration state). Exceeding it is a clean enumeration FAILURE.
+constexpr std::size_t kEnumerationBatchLimit = 100000;
+bool enumeration_batch_limit_exceeded(std::size_t batches_completed);
+
+// Validates the FIRST entry of a successful enumeration buffer before any
+// records are parsed: the header must fit, FileNameLength must be a
+// non-zero even byte count within the buffer, NextEntryOffset must be zero
+// or an 8-byte-aligned offset within the buffer, and FileAttributes must be
+// non-zero. Returns nullopt when the first entry is structurally valid;
+// otherwise a human-readable reason. A successful Win32 call whose buffer
+// contains no valid first entry is an out-of-contract state and must fail
+// closed (Phase 5.1.1).
+std::optional<std::string> validate_first_directory_entry(const unsigned char* data,
+                                                          std::size_t bytes);
 
 // Full handle-anchored enumeration of the immediate children of `root`:
 // FileIdBothDirectoryRestartInfo first, then FileIdBothDirectoryInfo
@@ -291,8 +354,25 @@ CategoryDirOpen open_category_directory(HANDLE root_handle,
 // relative single-component destination name built into a correctly sized
 // variable-length buffer (offsetof header, checked arithmetic, exact UTF-16
 // byte length, no terminator). The OS rejects an existing destination.
+// Win32 class 3 (FileRenameInfo) — fails with ERROR_INVALID_PARAMETER when
+// RootDirectory != NULL on OS build 26300.9711 (probe evidence, Phase 5).
 NativeResult rename_to_category(HANDLE source_handle, HANDLE destination_dir,
                                 std::string_view destination_name);
+
+// The SAME rename via the native interface: NtSetInformationFile with
+// FileRenameInformation (native class 10) and the layout-identical
+// FILE_RENAME_INFORMATION structure from <winternl.h>. Exists because the
+// Win32 class-3 path rejects RootDirectory-relative renames on OS build
+// 26300.9711 with ERROR_INVALID_PARAMETER (Phase 5 evidence). Runtime-
+// resolved NtSetInformationFile; NTSTATUS/IO_STATUS_BLOCK captured.
+NativeResult native_rename_to_category(HANDLE source_handle,
+                                       HANDLE destination_dir,
+                                       std::string_view destination_name);
+
+// Win32 class-3 variant kept for the controlled A/B comparison test.
+NativeResult win32_rename_to_category(HANDLE source_handle,
+                                      HANDLE destination_dir,
+                                      std::string_view destination_name);
 
 // ---------------------------------------------------------------------------
 // Destination category directory inspection (Phase 4, read-only).

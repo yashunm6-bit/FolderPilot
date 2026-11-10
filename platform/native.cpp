@@ -41,13 +41,16 @@ using NtCreateFile_fn = LONG (NTAPI*)(
     PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
 using RtlDosPathNameToNtPathName_U_fn =
     BOOLEAN (NTAPI*)(PCWSTR, PUNICODE_STRING, PWSTR*, PVOID);
+using NtSetInformationFile_fn = LONG (NTAPI*)(
+    HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
 using RtlFreeUnicodeString_fn = void (NTAPI*)(PUNICODE_STRING);
 
 struct NativeApis {
     NtCreateFile_fn nt_create_file = nullptr;
     RtlDosPathNameToNtPathName_U_fn dos_to_nt = nullptr;
     RtlFreeUnicodeString_fn free_unicode_string = nullptr;
-    bool ok() const { return nt_create_file != nullptr && dos_to_nt != nullptr && free_unicode_string != nullptr; }
+    NtSetInformationFile_fn nt_set_information_file = nullptr;
+    bool ok() const { return nt_create_file != nullptr && dos_to_nt != nullptr && free_unicode_string != nullptr && nt_set_information_file != nullptr; }
 };
 
 const NativeApis& native_apis() {
@@ -61,6 +64,8 @@ const NativeApis& native_apis() {
                 reinterpret_cast<void*>(::GetProcAddress(ntdll, "RtlDosPathNameToNtPathName_U")));
             resolved.free_unicode_string = reinterpret_cast<RtlFreeUnicodeString_fn>(
                 reinterpret_cast<void*>(::GetProcAddress(ntdll, "RtlFreeUnicodeString")));
+            resolved.nt_set_information_file = reinterpret_cast<NtSetInformationFile_fn>(
+                reinterpret_cast<void*>(::GetProcAddress(ntdll, "NtSetInformationFile")));
         }
         return resolved;
     }();
@@ -319,6 +324,63 @@ std::optional<std::string> current_user_home() {
 // Enumeration buffer parsing (pure).
 // ---------------------------------------------------------------------------
 
+std::optional<std::string> validate_first_directory_entry(const unsigned char* data,
+                                                          std::size_t bytes) {
+    constexpr std::size_t kHeader = offsetof(FILE_ID_BOTH_DIR_INFO, FileName);
+    if (bytes < kHeader) {
+        return std::string{"first entry header does not fit in the buffer"};
+    }
+
+    unsigned long name_length = 0;
+    unsigned long next_entry = 0;
+    unsigned long attributes = 0;
+    std::memcpy(&name_length, data + offsetof(FILE_ID_BOTH_DIR_INFO, FileNameLength),
+                sizeof(name_length));
+    std::memcpy(&next_entry, data + offsetof(FILE_ID_BOTH_DIR_INFO, NextEntryOffset),
+                sizeof(next_entry));
+    std::memcpy(&attributes, data + offsetof(FILE_ID_BOTH_DIR_INFO, FileAttributes),
+                sizeof(attributes));
+
+    if (name_length == 0 || name_length % 2 != 0) {
+        return std::string{"first entry has an invalid FileNameLength (" +
+                           std::to_string(name_length) +
+                           ") - no valid first entry was written"};
+    }
+    if (name_length > 255 * 2) {
+        return std::string{"first entry FileNameLength exceeds the maximum name length"};
+    }
+    if (kHeader + name_length > bytes) {
+        return std::string{"first entry filename extends past the buffer"};
+    }
+    if (attributes == 0) {
+        return std::string{"first entry has zero FileAttributes - no entry was written"};
+    }
+    if (next_entry != 0) {
+        if (next_entry % 8 != 0) {
+            return std::string{"first entry NextEntryOffset is not 8-byte aligned"};
+        }
+        if (next_entry > bytes) {
+            return std::string{"first entry NextEntryOffset points past the buffer"};
+        }
+    }
+    return std::nullopt;
+}
+
+bool is_legitimate_enumeration_end(unsigned long win32_error, bool initial_query) {
+    // Only ERROR_NO_MORE_FILES ends an enumeration, for both query kinds.
+    // The initial/continuation distinction is kept in the signature so the
+    // contract is explicit at the call site; MS-FSA's zero-match
+    // initial-query status (STATUS_NO_SUCH_FILE -> ERROR_FILE_NOT_FOUND)
+    // deliberately FAILS CLOSED. Full contract (generic Win32 vs MS-FSA
+    // vs the FolderPilot decision): see native.hpp above the declaration.
+    (void)initial_query;
+    return win32_error == ERROR_NO_MORE_FILES;
+}
+
+bool enumeration_batch_limit_exceeded(std::size_t batches_completed) {
+    return batches_completed >= kEnumerationBatchLimit;
+}
+
 DirParseResult parse_id_both_dir_entries(const unsigned char* data, std::size_t bytes) {
     DirParseResult result;
     if (bytes == 0) {
@@ -351,23 +413,51 @@ DirParseResult parse_id_both_dir_entries(const unsigned char* data, std::size_t 
         std::memcpy(&last_write_time, data + offset + offsetof(FILE_ID_BOTH_DIR_INFO, LastWriteTime), sizeof(last_write_time));
         std::memcpy(&file_id, data + offset + offsetof(FILE_ID_BOTH_DIR_INFO, FileId), sizeof(file_id));
 
-        if (next_entry != 0 && next_entry % 8 != 0) {
-            result.status = DirParseStatus::MisalignedEntry;
-            result.error = "NextEntryOffset is not 8-byte aligned";
+        // Overflow-proof bounds checks: compare against the remaining bytes
+        // subtractively (all quantities are bounded by the 64 KiB buffer,
+        // and name_length/next_entry are 32-bit values from the record, so
+        // no 64-bit sum can wrap - the subtractive form also keeps this
+        // safe if the parser is ever compiled 32-bit).
+
+        // No legitimate directory entry has an empty name. An all-zero
+        // header region means the OS wrote nothing into the buffer -
+        // out of contract for a successful call; fail closed.
+        if (name_length == 0) {
+            result.status = DirParseStatus::ZeroLengthName;
+            result.error = "entry declares a zero-length filename (nothing written or malformed)";
             return result;
         }
-
         if (name_length % 2 != 0) {
             result.status = DirParseStatus::BadNameLength;
             result.error = "FileNameLength is not a whole number of UTF-16 code units";
             return result;
         }
-
-        const std::size_t name_offset = offset + kHeaderBytes;
-        if (name_offset + name_length > bytes) {
+        if (name_length > bytes - (offset + kHeaderBytes)) {
             result.status = DirParseStatus::NameOutOfBounds;
             result.error = "filename bytes extend past the buffer";
             return result;
+        }
+        const std::size_t name_offset = offset + kHeaderBytes;
+        const std::size_t record_bytes = kHeaderBytes + name_length;
+
+        if (next_entry != 0) {
+            // The next entry must start at or beyond the end of THIS record:
+            // a smaller offset would place it inside the current record.
+            if (next_entry < record_bytes) {
+                result.status = DirParseStatus::OverlappingEntry;
+                result.error = "NextEntryOffset overlaps the current record";
+                return result;
+            }
+            if (next_entry % 8 != 0) {
+                result.status = DirParseStatus::MisalignedEntry;
+                result.error = "NextEntryOffset is not 8-byte aligned";
+                return result;
+            }
+            if (next_entry > bytes - offset) {
+                result.status = DirParseStatus::EntryOutOfBounds;
+                result.error = "NextEntryOffset points past the buffer";
+                return result;
+            }
         }
 
         result.entries.push_back(RawDirEntry{
@@ -376,11 +466,6 @@ DirParseResult parse_id_both_dir_entries(const unsigned char* data, std::size_t 
 
         if (next_entry == 0) {
             break; // last entry in this batch
-        }
-        if (offset + next_entry > bytes) {
-            result.status = DirParseStatus::EntryOutOfBounds;
-            result.error = "NextEntryOffset points past the buffer";
-            return result;
         }
         offset += next_entry;
     }
@@ -403,23 +488,51 @@ NativeResult enumerate_immediate_children(
     std::vector<std::byte> buffer(buffer_size);
 
     FILE_INFO_BY_HANDLE_CLASS info_class = FileIdBothDirectoryRestartInfo;
+    bool initial_query = true;
+    std::size_t batches = 0;
     for (;;) {
-        // GetFileInformationByHandleEx returns only success/failure - it does
-        // NOT report how many bytes were written. The valid region therefore
-        // ends at the entry whose NextEntryOffset is 0, which the parser
-        // uses; the whole buffer is handed to it as the bounds.
+        if (enumeration_batch_limit_exceeded(batches)) {
+            return {false, NativeFailure::Other,
+                    "directory enumeration exceeded the batch limit (" +
+                        std::to_string(kEnumerationBatchLimit) +
+                        " batches) - possible non-terminal enumeration state", 0};
+        }
+        ++batches;
+
+        // Clear the ENTIRE buffer before each call: GetFileInformationByHandleEx
+        // does not report how many bytes it wrote, so only records from the
+        // CURRENT call may be parsed. Stale data from previous batches would
+        // otherwise be re-walked (the Phase 5.1 busy-loop root cause).
+        std::memset(buffer.data(), 0, buffer.size());
+
         if (!::GetFileInformationByHandleEx(root, info_class, buffer.data(),
                                             static_cast<DWORD>(buffer.size()))) {
             const DWORD err = ::GetLastError();
-            if (err == ERROR_NO_MORE_FILES) {
-                return {true, NativeFailure::Other, {}, 0}; // clean end of enumeration
+            if (is_legitimate_enumeration_end(err, initial_query)) {
+                return {true, NativeFailure::Other, {}, 0}; // legitimate completion
             }
             if (err == ERROR_INSUFFICIENT_BUFFER) {
                 return {false, NativeFailure::Other,
                         "a single directory entry exceeds the enumeration buffer", err};
             }
+            // Fail closed on everything else - unrelated errors are never
+            // treated as end-of-directory.
             return {false, NativeFailure::Other,
                     win32_message("GetFileInformationByHandleEx(directory)", err), err};
+        }
+        initial_query = false;
+
+        // A successful call must present a structurally valid first entry.
+        // An empty or malformed first entry is an explicit enumeration
+        // ERROR, never a successful end-of-directory.
+        if (const auto first_entry_error =
+                validate_first_directory_entry(
+                    reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+            first_entry_error.has_value()) {
+            return {false, NativeFailure::Other,
+                    "successful enumeration call has an invalid first entry: " +
+                        *first_entry_error,
+                    0};
         }
 
         const auto parsed = parse_id_both_dir_entries(
@@ -780,7 +893,7 @@ CategoryDirOpen open_category_directory(HANDLE root_handle,
     return out;
 }
 
-NativeResult rename_to_category(HANDLE source_handle, HANDLE destination_dir,
+NativeResult win32_rename_to_category(HANDLE source_handle, HANDLE destination_dir,
                                 std::string_view destination_name) {
     if (source_handle == nullptr || destination_dir == nullptr) {
         return {false, NativeFailure::Other, "source or destination handle is not valid", 0};
@@ -849,6 +962,69 @@ NativeResult rename_to_category(HANDLE source_handle, HANDLE destination_dir,
     }
     return {true, NativeFailure::Other, {}, 0};
 }
+NativeResult native_rename_to_category(HANDLE source_handle, HANDLE destination_dir,
+                                       std::string_view destination_name) {
+    if (source_handle == nullptr || destination_dir == nullptr) {
+        return {false, NativeFailure::Other, "source or destination handle is not valid", 0};
+    }
+    if (destination_name.empty() || destination_name == "." || destination_name == ".." ||
+        destination_name.find_first_of("/\\:") != std::string_view::npos) {
+        return {false, NativeFailure::InvalidPath,
+                "destination name is not a single safe path component", 0};
+    }
+    const auto wide = to_utf16(destination_name);
+    if (!wide.ok) {
+        return {false, NativeFailure::InvalidPath,
+                "destination name is not valid UTF-8: " + wide.error, 0};
+    }
+    if (!native_apis().ok()) {
+        return {false, NativeFailure::Unsupported,
+                "required ntdll functions are unavailable", 0};
+    }
+
+    // FILE_RENAME_INFORMATION (winternl.h) is layout-identical to
+    // FILE_RENAME_INFO: union BOOLEAN/DWORD at 0, RootDirectory at 8,
+    // FileNameLength (ULONG) at 16, FileName at offsetof = 20 (x64).
+    constexpr std::size_t kHeader = offsetof(FILE_RENAME_INFORMATION, FileName);
+    if (wide.value.size() > (std::numeric_limits<ULONG>::max)() / sizeof(WCHAR) ||
+        sizeof(FILE_RENAME_INFORMATION) >
+            (std::numeric_limits<ULONG>::max)() - wide.value.size() * sizeof(WCHAR)) {
+        return {false, NativeFailure::InvalidPath,
+                "destination name exceeds the maximum representable length", 0};
+    }
+    const ULONG name_bytes = static_cast<ULONG>(wide.value.size() * sizeof(WCHAR));
+    const ULONG total = static_cast<ULONG>(sizeof(FILE_RENAME_INFORMATION) + name_bytes);
+
+    std::vector<std::byte> buffer(total);
+    auto* info = reinterpret_cast<FILE_RENAME_INFORMATION*>(buffer.data());
+    info->ReplaceIfExists = FALSE;                        // OS-enforced no-overwrite
+    info->RootDirectory = destination_dir;                // validated category handle
+    info->FileNameLength = name_bytes;                    // exact UTF-16 byte count
+    std::memcpy(buffer.data() + kHeader, wide.value.data(), name_bytes);
+    *reinterpret_cast<wchar_t*>(buffer.data() + kHeader + name_bytes) = L'\0'; // slack, uncounted
+
+    IO_STATUS_BLOCK iosb{};
+    const LONG status = native_apis().nt_set_information_file(
+        source_handle, &iosb, buffer.data(), total, FileRenameInformation);
+    // Primary result: the returned NTSTATUS. IoStatusBlock.Status mirrors it
+    // for a synchronous handle; Information stays 0 for renames.
+    if (status < 0) {
+        return {false, classify_ntstatus(status),
+                ntstatus_message("NtSetInformationFile(FileRenameInformation)", status),
+                static_cast<unsigned long>(status)};
+    }
+    return {true, NativeFailure::Other, {}, static_cast<unsigned long>(status)};
+}
+
+// The production primitive uses the NATIVE anchored rename: the Win32
+// class-3 wrapper rejects RootDirectory-relative forms on OS build
+// 26300.9711 with ERROR_INVALID_PARAMETER (Phase 5 evidence, see the
+// A/B comparison test).
+NativeResult rename_to_category(HANDLE source_handle, HANDLE destination_dir,
+                                std::string_view destination_name) {
+    return native_rename_to_category(source_handle, destination_dir, destination_name);
+}
+
 
 bool identity_matches(const SourceIdentity& a, const SourceIdentity& b) {
     // A representation mismatch fails closed (never compare across variants).

@@ -218,7 +218,11 @@ Safety invariants and their wording constraints: see
   alignment of `NextEntryOffset`, even `FileNameLength`, and name-region
   bounds; the chain ends at `NextEntryOffset == 0` (the Win32 API does not
   report the written byte count). A single entry larger than the buffer
-  fails the scan rather than being skipped.
+  fails the scan rather than being skipped. Only `ERROR_NO_MORE_FILES` is
+  accepted as the end of enumeration, for both the initial and
+  continuation queries; MS-FSA's zero-match initial-query status
+  (`STATUS_NO_SUCH_FILE` → `ERROR_FILE_NOT_FOUND`) fails closed rather
+  than being adopted as an empty result (contract in `platform/native.hpp`).
 - **Scanner**: non-recursive; `.`/`..`, directories, reparse points
   (any tag), hidden, and system entries are skipped with structured reasons
   before any open; candidates are opened relative to the root handle
@@ -232,7 +236,9 @@ Safety invariants and their wording constraints: see
   comparison and a stable byte-wise tie-break; name-equal entries are never
   deduplicated.
 - **Known platform observations** (documented, handled): some filesystem
-  surfaces return `.`/`..` through directory enumeration — the scanner
+  surfaces return `.`/`..` through directory enumeration (MS-FSA makes
+  them part of first/restart queries except on a volume root — FolderPilot
+  never enumerates a volume root) — the scanner
   skips them defensively as `ReservedName`; a directory reparse point
   replacing a candidate file is rejected by the `FILE_NON_DIRECTORY_FILE`
   open (`NotRegularFile`) before any tag check — both outcomes are safe
