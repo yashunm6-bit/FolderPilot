@@ -69,6 +69,19 @@ bool snapshots_equal(const Snapshot& a, const Snapshot& b);
 // Returns true when the file exists and its bytes equal  exactly.
 bool file_content_matches(const std::filesystem::path& p, const std::string& expected);
 
+// Extended-length-aware (\\?\-prefixed) variants: reliable for names whose
+// full path exceeds MAX_PATH, e.g. the 255-UTF-16-unit A/B test name that
+// plain std::filesystem calls cannot see.
+bool file_exists_extended(const std::filesystem::path& p);
+bool file_content_matches_extended(const std::filesystem::path& p,
+                                   const std::string& expected);
+
+// Textual identity (volume serial + file id; FileIdInfo preferred, legacy
+// GetFileInformationByHandle fallback) of the file at p. Empty when the file
+// cannot be opened. Used to PROVE that delete-and-recreate produces a
+// genuinely different identity before asserting SourceReplaced.
+std::string file_id_string(const std::filesystem::path& p);
+
 // One-time capability probe (cached): does the approved RootDirectory-
 // relative handle rename work on this OS build? On build 26300 it returns
 // ERROR_INVALID_PARAMETER for every RootDirectory-relative form while

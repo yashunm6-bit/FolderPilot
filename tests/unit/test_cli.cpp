@@ -53,8 +53,11 @@ TEST_CASE("CLI --apply performs real movement inside the sandbox") {
 
     if (root_relative_rename_supported()) {
         CHECK(run.exit_code == 0);
-        CHECK(run.output.find("resume.pdf -> Documents/resume.pdf: Moved") != std::string::npos);
-        CHECK(run.output.find("photo.jpg -> Images/photo.jpg: Moved") != std::string::npos);
+        // Execution-report format (verified at runtime in Phase 5): moves are
+        // listed under a category header with the BARE destination name; the
+        // "category/name" form is the dry-run format, not this one.
+        CHECK(run.output.find("resume.pdf -> resume.pdf: Moved") != std::string::npos);
+        CHECK(run.output.find("photo.jpg -> photo.jpg: Moved") != std::string::npos);
         CHECK_FALSE(std::filesystem::exists(dir.path() / L"resume.pdf"));
         CHECK_FALSE(std::filesystem::exists(dir.path() / L"photo.jpg"));
         CHECK(std::filesystem::exists(dir.path() / L"Documents" / L"resume.pdf"));

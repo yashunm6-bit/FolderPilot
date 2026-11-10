@@ -3,8 +3,10 @@
 #include "phase3_fixture.hpp"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -37,21 +39,116 @@ std::wstring with_backslashes(const std::filesystem::path& p) {
     return preferred.wstring();
 }
 
-// Removes ONLY top-level reparse-point LINKS, then the remaining tree.
-// Prevents any recursive cleanup from ever walking through a junction.
-void remove_tree_link_safe(const std::filesystem::path& p) {
-    std::error_code ec;
-    for (std::filesystem::directory_iterator it{p, ec}, end; !ec && it != end; ++it) {
-        const DWORD attrs = ::GetFileAttributesW(it->path().c_str());
-        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                ::RemoveDirectoryW(it->path().c_str());
-            } else {
-                ::DeleteFileW(it->path().c_str());
+// Extended-length-aware path form (\\?\ prefix). The test suite creates
+// names whose full path exceeds MAX_PATH (e.g. 255-UTF-16-unit names), which
+// plain Win32 paths cannot address; every cleanup operation goes through
+// this form. std::filesystem::remove_all is NOT used: it fails on such names
+// and (libstdc++, GCC 16.1) hangs when an entry cannot be deleted.
+std::wstring with_extended_prefix(const std::filesystem::path& p) {
+    std::wstring s = with_backslashes(p);
+    if (s.rfind(L"\\\\?\\", 0) == 0) {
+        return s;
+    }
+    return L"\\\\?\\" + s;
+}
+
+// Bounded, reparse-safe recursive removal over \\?\ paths. Reparse points
+// (junctions, symlinks, cloud placeholders) are removed as LINKS and never
+// followed, so cleanup can never escape the sandbox through one. Depth is
+// capped so a pathological tree cannot recurse without end. Returns false
+// when ANY entry could not be deleted; first_error carries a description of
+// the first failure. Deletion continues after a failure (best effort), and
+// genuine failures are NEVER swallowed silently - the caller reports them.
+bool remove_tree_extended(const std::filesystem::path& p, int depth,
+                          std::wstring& first_error) {
+    constexpr int kMaxDepth = 64;
+    if (depth > kMaxDepth) {
+        if (first_error.empty()) {
+            first_error = L"cleanup recursion depth limit exceeded: " + with_backslashes(p);
+        }
+        return false;
+    }
+
+    bool ok = true;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = ::FindFirstFileW((with_extended_prefix(p) + L"\\*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) {
+        const DWORD err = ::GetLastError();
+        if (err != ERROR_FILE_NOT_FOUND && err != ERROR_NO_MORE_FILES &&
+            err != ERROR_PATH_NOT_FOUND) {
+            if (first_error.empty()) {
+                first_error = L"FindFirstFileW failed (error " + std::to_wstring(err) +
+                              L"): " + with_backslashes(p);
             }
+            return false;
+        }
+        return true; // nothing to enumerate
+    }
+    for (;;) {
+        const std::wstring_view name{fd.cFileName};
+        if (name != L"." && name != L"..") {
+            const std::filesystem::path child = p / std::wstring(name);
+            bool removed = false;
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                // The LINK itself - never its target.
+                removed = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                              ? ::RemoveDirectoryW(with_extended_prefix(child).c_str()) != 0
+                              : ::DeleteFileW(with_extended_prefix(child).c_str()) != 0;
+                if (!removed && first_error.empty()) {
+                    first_error = L"failed to remove reparse point (error " +
+                                  std::to_wstring(::GetLastError()) + L"): " +
+                                  with_backslashes(child);
+                }
+            } else if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                removed = remove_tree_extended(child, depth + 1, first_error);
+            } else {
+                removed = ::DeleteFileW(with_extended_prefix(child).c_str()) != 0;
+                if (!removed && first_error.empty()) {
+                    first_error = L"failed to delete file (error " +
+                                  std::to_wstring(::GetLastError()) + L"): " +
+                                  with_backslashes(child);
+                }
+            }
+            ok = ok && removed;
+        }
+        if (!::FindNextFileW(find, &fd)) {
+            const DWORD err = ::GetLastError();
+            if (err != ERROR_NO_MORE_FILES) {
+                if (first_error.empty()) {
+                    first_error = L"FindNextFileW failed (error " + std::to_wstring(err) +
+                                  L"): " + with_backslashes(p);
+                }
+                ok = false;
+            }
+            break;
         }
     }
-    std::filesystem::remove_all(p, ec);
+    ::FindClose(find);
+
+    if (!::RemoveDirectoryW(with_extended_prefix(p).c_str())) {
+        if (first_error.empty()) {
+            first_error = L"failed to remove directory (error " +
+                          std::to_wstring(::GetLastError()) + L"): " + with_backslashes(p);
+        }
+        ok = false;
+    }
+    return ok;
+}
+
+// Reads `bytes.size() + 1` bytes from `path` (a fully-formed Win32 or \\?\-
+// prefixed path) and compares byte-exactly against `expected`.
+bool content_matches_path(const std::wstring& path, const std::string& expected) {
+    HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::string actual(expected.size(), char(0));
+    DWORD read = 0;
+    const BOOL ok = ::ReadFile(h, actual.data(), static_cast<DWORD>(expected.size() + 1), &read, nullptr);
+    ::CloseHandle(h);
+    return ok != 0 && read == expected.size() && actual == expected;
 }
 
 } // namespace
@@ -65,7 +162,11 @@ SandboxDir::SandboxDir(const std::string& name, SandboxRoot root) {
     }
     sandbox_root_ = base;
     static std::atomic<int> counter{0};
-    path_ = sandbox_root_ / (name + "-" + std::to_string(counter.fetch_add(1)));
+    // PID in the name: killed test runs leave leaked fixtures behind, and a
+    // per-process counter alone would collide with them on the next run.
+    const std::string unique = name + '-' + std::to_string(::GetCurrentProcessId()) +
+                               '-' + std::to_string(counter.fetch_add(1));
+    path_ = sandbox_root_ / unique;
     std::error_code ec;
     std::filesystem::create_directories(path_, ec);
 }
@@ -73,7 +174,9 @@ SandboxDir::SandboxDir(const std::string& name, SandboxRoot root) {
 SandboxDir::SandboxDir(const std::string& name, const std::filesystem::path& base) {
     sandbox_root_ = base;
     static std::atomic<int> counter{0};
-    path_ = sandbox_root_ / (name + "-" + std::to_string(counter.fetch_add(1)));
+    const std::string unique = name + '-' + std::to_string(::GetCurrentProcessId()) +
+                               '-' + std::to_string(counter.fetch_add(1));
+    path_ = sandbox_root_ / unique;
     std::error_code ec;
     std::filesystem::create_directories(path_, ec);
 }
@@ -93,7 +196,15 @@ SandboxDir::~SandboxDir() {
         target[base.size()] != L'\\') {
         return; // verification failed - refuse to clean
     }
-    remove_tree_link_safe(path_);
+    std::wstring first_error;
+    if (!remove_tree_extended(path_, 0, first_error)) {
+        // Genuine cleanup failures are never swallowed: they are reported on
+        // stderr so the test harness surfaces them (a leftover fixture dir is
+        // always a test-side problem worth investigating).
+        std::fprintf(stderr, "FIXTURE CLEANUP FAILURE (%ls): %ls\n",
+                     with_backslashes(path_).c_str(), first_error.c_str());
+        std::fflush(stderr);
+    }
 }
 
 std::string SandboxDir::u8() const {
@@ -234,7 +345,11 @@ bool snapshots_equal(const Snapshot& a, const Snapshot& b) {
 }
 
 bool root_relative_rename_supported() {
-    static const bool supported = [] {
+    // The first filesystem operations after a fresh binary link can fail
+    // transiently (antivirus/WDAC settling), so the probe retries before
+    // concluding the mechanism is unsupported. Only a stable failure is
+    // cached.
+    const auto evaluate = [] {
         SandboxDir probe{"exec-capability", SandboxRoot::Phase5};
         create_file(probe.path(), L"probe-src.txt", "x");
         create_directory(probe.path(), std::wstring(L"Documents"));
@@ -251,11 +366,17 @@ bool root_relative_rename_supported() {
         if (!cat.ok) {
             return false;
         }
-        const auto renamed = folderpilot::platform::rename_to_category(
+        const auto renamed = folderpilot::platform::native_rename_to_category(
             src.handle.get(), cat.handle.get(), "probe-dst.txt");
         return renamed.ok;
-    }();
-    return supported;
+    };
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (evaluate()) {
+            return true;
+        }
+        ::Sleep(300);
+    }
+    return false;
 }
 
 const char kMovementSkipReason[] =
@@ -263,16 +384,55 @@ const char kMovementSkipReason[] =
     "on this OS build - the approved movement mechanism is blocked";
 
 bool file_content_matches(const std::filesystem::path& p, const std::string& expected) {
-    HANDLE h = ::CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Full share mode: a test-side read must not fail merely because the
+    // process itself (or the executor) holds a DELETE-capable handle on the
+    // file being verified.
+    return content_matches_path(with_backslashes(p), expected);
+}
+
+bool file_exists_extended(const std::filesystem::path& p) {
+    const DWORD attrs = ::GetFileAttributesW(with_extended_prefix(p).c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES;
+}
+
+bool file_content_matches_extended(const std::filesystem::path& p,
+                                   const std::string& expected) {
+    return content_matches_path(with_extended_prefix(p), expected);
+}
+
+std::string file_id_string(const std::filesystem::path& p) {
+    HANDLE h = ::CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
-        return false;
+        return {}; // unreadable: callers treat empty as verification failure
     }
-    std::string actual(expected.size(), char(0));
-    DWORD read = 0;
-    const BOOL ok = ::ReadFile(h, actual.data(), static_cast<DWORD>(expected.size() + 1), &read, nullptr);
+    char buf[16]{}; // small hex chunk buffer
+    std::string out;
+    FILE_ID_INFO info{};
+    if (::GetFileInformationByHandleEx(h, FileIdInfo, &info, sizeof(info))) {
+        out = "ex:";
+        std::snprintf(buf, sizeof(buf), "%016llx",
+                      static_cast<unsigned long long>(info.VolumeSerialNumber));
+        out += buf;
+        for (const unsigned char b : info.FileId.Identifier) {
+            std::snprintf(buf, sizeof(buf), "%02x", b);
+            out += buf;
+        }
+    } else {
+        BY_HANDLE_FILE_INFORMATION legacy{};
+        if (::GetFileInformationByHandle(h, &legacy)) {
+            out = "lg:";
+            std::snprintf(buf, sizeof(buf), "%08lx", legacy.dwVolumeSerialNumber);
+            out += buf;
+            std::snprintf(buf, sizeof(buf), "%08x%08x",
+                          static_cast<unsigned>(legacy.nFileIndexHigh),
+                          static_cast<unsigned>(legacy.nFileIndexLow));
+            out += buf;
+        }
+    }
     ::CloseHandle(h);
-    return ok != 0 && read == expected.size() && actual == expected;
+    return out;
 }
 
 CliRun run_folderpilot_cli(const std::vector<std::wstring>& arguments) {

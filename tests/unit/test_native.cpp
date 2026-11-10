@@ -164,6 +164,126 @@ TEST_CASE("directory buffer parser accepts an empty batch") {
     CHECK(parsed.entries.empty());
 }
 
+TEST_CASE("no-write response over a previously populated buffer fails closed") {
+    // Enumeration buffer reuse scenario: batch 1 populated the buffer, the
+    // next call wrote NOTHING (all bytes zero). The parser must report an
+    // explicit malformed state - never an apparently valid empty entry.
+    auto buffer = build_entry(L"stale.txt", 0);
+    std::memset(buffer.data(), 0, buffer.size());
+
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+    CHECK(parsed.status == DirParseStatus::ZeroLengthName);
+    CHECK(parsed.entries.empty());
+}
+
+TEST_CASE("successful response with an empty first entry is rejected") {
+    std::vector<std::byte> buffer(offsetof(FILE_ID_BOTH_DIR_INFO, FileName) + 4);
+    // All-zero header: NextEntryOffset 0, FileNameLength 0, attributes 0.
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+    CHECK(parsed.status == DirParseStatus::ZeroLengthName);
+    CHECK(parsed.entries.empty());
+}
+
+TEST_CASE("first-entry validation accepts valid and rejects invalid headers") {
+    const auto valid = build_entry(L"ok.txt", 0);
+    CHECK_FALSE(validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(valid.data()), valid.size()).has_value());
+
+    // Nothing written: all-zero header region.
+    std::vector<std::byte> empty(offsetof(FILE_ID_BOTH_DIR_INFO, FileName) + 8);
+    const auto empty_result = validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(empty.data()), empty.size());
+    REQUIRE(empty_result.has_value());
+    CHECK(empty_result->find("no valid first entry") != std::string::npos);
+
+    // Odd (non-UTF-16) name length.
+    auto odd = build_entry(L"abc", 0);
+    unsigned long bad_len = 5;
+    std::memcpy(odd.data() + offsetof(FILE_ID_BOTH_DIR_INFO, FileNameLength), &bad_len, 4);
+    const auto odd_result = validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(odd.data()), odd.size());
+    REQUIRE(odd_result.has_value());
+    CHECK(odd_result->find("invalid FileNameLength") != std::string::npos);
+
+    // Filename length beyond the 255-UTF-16-unit maximum: the max-length
+    // guard rejects BEFORE the buffer-bounds check runs.
+    auto huge_len = build_entry(L"abc", 0);
+    unsigned long huge = 100000;
+    std::memcpy(huge_len.data() + offsetof(FILE_ID_BOTH_DIR_INFO, FileNameLength), &huge, 4);
+    const auto huge_result = validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(huge_len.data()), huge_len.size());
+    REQUIRE(huge_result.has_value());
+    CHECK(huge_result->find("exceeds the maximum name length") != std::string::npos);
+
+    // Filename beyond the buffer: a length within the 255-unit maximum but
+    // past this small buffer reaches the buffer-bounds validation.
+    auto oob = build_entry(L"abc", 0);
+    unsigned long bounds_len = 500; // even, <= 510, but kHeader + 500 > buffer
+    std::memcpy(oob.data() + offsetof(FILE_ID_BOTH_DIR_INFO, FileNameLength), &bounds_len, 4);
+    const auto oob_result = validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(oob.data()), oob.size());
+    REQUIRE(oob_result.has_value());
+    CHECK(oob_result->find("extends past the buffer") != std::string::npos);
+
+    // Misaligned NextEntryOffset.
+    auto misaligned = build_entry(L"abc", 0);
+    unsigned long bad_next = 12;
+    std::memcpy(misaligned.data() + offsetof(FILE_ID_BOTH_DIR_INFO, NextEntryOffset),
+                &bad_next, 4);
+    const auto mis_result = validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(misaligned.data()), misaligned.size());
+    REQUIRE(mis_result.has_value());
+    CHECK(mis_result->find("8-byte aligned") != std::string::npos);
+
+    // NextEntryOffset past the buffer.
+    auto far_next = build_entry(L"abc", 0);
+    unsigned long far_next_value = 1000000;
+    std::memcpy(far_next.data() + offsetof(FILE_ID_BOTH_DIR_INFO, NextEntryOffset),
+                &far_next_value, 4);
+    const auto far_result = validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(far_next.data()), far_next.size());
+    REQUIRE(far_result.has_value());
+    CHECK(far_result->find("points past the buffer") != std::string::npos);
+
+    // Over-long filename (more than 255 UTF-16 units).
+    auto overlong = build_entry(std::wstring(300, L'x'), 0);
+    const auto over_result = validate_first_directory_entry(
+        reinterpret_cast<const unsigned char*>(overlong.data()), overlong.size());
+    REQUIRE(over_result.has_value());
+    CHECK(over_result->find("maximum name length") != std::string::npos);
+}
+
+TEST_CASE("enumeration completion contract: initial vs continuation queries") {
+    // Documented terminal status: always legitimate.
+    CHECK(is_legitimate_enumeration_end(ERROR_NO_MORE_FILES, true));
+    CHECK(is_legitimate_enumeration_end(ERROR_NO_MORE_FILES, false));
+
+    // ERROR_FILE_NOT_FOUND is NOT a legitimate end: the documented
+    // GetFileInformationByHandleEx contract names only ERROR_NO_MORE_FILES,
+    // and FolderPilot enumerates ordinary LOCAL directories (share roots
+    // and volume roots are rejected) where a NOT_FOUND more plausibly
+    // indicates the directory vanished after bootstrap - fail closed.
+    CHECK_FALSE(is_legitimate_enumeration_end(ERROR_FILE_NOT_FOUND, true));
+    CHECK_FALSE(is_legitimate_enumeration_end(ERROR_FILE_NOT_FOUND, false));
+
+    // Everything else fails closed on both query kinds.
+    CHECK_FALSE(is_legitimate_enumeration_end(ERROR_ACCESS_DENIED, true));
+    CHECK_FALSE(is_legitimate_enumeration_end(ERROR_ACCESS_DENIED, false));
+    CHECK_FALSE(is_legitimate_enumeration_end(ERROR_INSUFFICIENT_BUFFER, true));
+    CHECK_FALSE(is_legitimate_enumeration_end(ERROR_WRITE_FAULT, false));
+    CHECK_FALSE(is_legitimate_enumeration_end(ERROR_NOT_SUPPORTED, true));
+}
+
+TEST_CASE("enumeration batch limit is a documented clean-failure boundary") {
+    CHECK(kEnumerationBatchLimit == 100000);
+    CHECK_FALSE(enumeration_batch_limit_exceeded(0));
+    CHECK_FALSE(enumeration_batch_limit_exceeded(kEnumerationBatchLimit - 1));
+    CHECK(enumeration_batch_limit_exceeded(kEnumerationBatchLimit));
+    CHECK(enumeration_batch_limit_exceeded(kEnumerationBatchLimit + 1));
+}
+
 TEST_CASE("directory buffer parser preserves dot and dot-dot entries verbatim") {
     // Some filesystems surface "." and ".." through enumeration; the parser
     // must hand them through unchanged so the scanner can skip them.
@@ -180,6 +300,39 @@ TEST_CASE("directory buffer parser preserves dot and dot-dot entries verbatim") 
     REQUIRE(parsed2.status == DirParseStatus::Ok);
     REQUIRE(parsed2.entries.size() == 1);
     CHECK(parsed2.entries[0].name == L"..");
+}
+
+TEST_CASE("directory buffer parser rejects overlapping NextEntryOffset") {
+    // A next-offset that lands INSIDE the current record would parse
+    // record bytes as an entry header - malformed, rejected.
+    auto buffer = build_entry(L"overlapped-name.txt", 0);
+    unsigned long small_next = 8; // aligned but inside this record
+    std::memcpy(buffer.data() + offsetof(FILE_ID_BOTH_DIR_INFO, NextEntryOffset),
+                &small_next, 4);
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+    CHECK(parsed.status == DirParseStatus::OverlappingEntry);
+    CHECK(parsed.entries.empty());
+}
+
+TEST_CASE("directory buffer parser accepts a tight non-overlapping chain") {
+    // next == the current record size (8-aligned) is valid: the next
+    // entry starts exactly at the end of this one.
+    auto first = build_entry(L"one.txt", 0);
+    auto second = build_entry(L"two.txt", 0);
+    const unsigned long stride =
+        static_cast<unsigned long>((first.size() + 7) / 8 * 8);
+    std::vector<std::byte> buffer(stride + second.size());
+    std::memcpy(buffer.data(), first.data(), first.size());
+    std::memcpy(buffer.data() + stride, second.data(), second.size());
+    *reinterpret_cast<unsigned long*>(buffer.data()) = stride;
+
+    const auto parsed = parse_id_both_dir_entries(
+        reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+    REQUIRE(parsed.status == DirParseStatus::Ok);
+    REQUIRE(parsed.entries.size() == 2);
+    CHECK(parsed.entries[0].name == L"one.txt");
+    CHECK(parsed.entries[1].name == L"two.txt");
 }
 
 TEST_CASE("directory buffer parser keeps duplicate names (no deduplication)") {
@@ -258,11 +411,23 @@ TEST_CASE("directory buffer parser rejects malformed entries") {
     }
     SUBCASE("misaligned NextEntryOffset") {
         auto buffer = build_entry(L"a", 0);
-        unsigned long bad = 12; // not an 8-byte multiple
-        std::memcpy(buffer.data(), &bad, 4);
+        // The parser's check order is deliberate: overlap, then alignment,
+        // then bounds. An offset must therefore be BEYOND this record to
+        // reach the alignment check; a smaller value overlaps and the
+        // overlap check fires first (covered by its own test case above).
+        unsigned long misaligned = 108; // >= record size (98), 108 % 8 == 4
+        std::memcpy(buffer.data(), &misaligned, 4);
         const auto parsed = parse_id_both_dir_entries(
             reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
         CHECK(parsed.status == DirParseStatus::MisalignedEntry);
+
+        // An ALIGNED offset beyond the buffer passes alignment and reaches
+        // the bounds check - documenting the alignment-before-bounds order.
+        unsigned long aligned_oob = 112; // 8-aligned, but past the 98-byte buffer
+        std::memcpy(buffer.data(), &aligned_oob, 4);
+        const auto parsed_oob = parse_id_both_dir_entries(
+            reinterpret_cast<const unsigned char*>(buffer.data()), buffer.size());
+        CHECK(parsed_oob.status == DirParseStatus::EntryOutOfBounds);
     }
     SUBCASE("NextEntryOffset past the buffer") {
         auto buffer = build_entry(L"a", 0);

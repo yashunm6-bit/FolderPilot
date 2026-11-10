@@ -55,17 +55,10 @@ const MoveRecord* find_record(const ExecutionResult& result, const std::string& 
 }
 
 bool file_exists_with_content(const std::filesystem::path& p, const std::string& bytes) {
-    HANDLE h = ::CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    std::string content(bytes.size(), '\0');
-    DWORD read = 0;
-    const bool ok = ::ReadFile(h, content.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) &&
-                    read == bytes.size() && content == bytes;
-    ::CloseHandle(h);
-    return ok;
+    // Delegates to the fixture helper (full share mode): this check must not
+    // fail merely because the test itself holds a DELETE-capable handle on
+    // the file being verified (the locked-source test does exactly that).
+    return fixture::file_content_matches(p, bytes);
 }
 
 } // namespace
@@ -182,8 +175,23 @@ TEST_CASE("executor rejects a source replaced after planning") {
     fx.plan = build_plan(fx.guard.root, fx.scan);
     REQUIRE(fx.plan.valid());
 
-    // Replace the source with a DIFFERENT regular file after planning.
+    // Replace the source with a GENUINELY DIFFERENT regular file after
+    // planning. fixture::create_file alone is NOT a replacement: it opens
+    // with CREATE_ALWAYS, which truncates the existing file in place and
+    // keeps the same NTFS file id (verified via fsutil in Phase 5 runtime
+    // verification) - the executor would then see an unchanged identity and
+    // move the file, per the ratified identity-not-content policy. A real
+    // replacement is delete + recreate, and this test PROVES the identity
+    // changed before asserting the executor detects it.
+    const auto id_before =
+        fixture::file_id_string(fx.dir.path() / L"note.txt");
+    REQUIRE_FALSE(id_before.empty());
+    REQUIRE(::DeleteFileW((fx.dir.path() / L"note.txt").c_str()) != 0);
     REQUIRE(fixture::create_file(fx.dir.path(), L"note.txt", "REPLACED"));
+    const auto id_after =
+        fixture::file_id_string(fx.dir.path() / L"note.txt");
+    REQUIRE_FALSE(id_after.empty());
+    REQUIRE(id_before != id_after); // the identity genuinely changed
 
     const auto result = execute_plan(fx.plan, fx.dir.u8());
     REQUIRE(result.records.size() == 1);
@@ -245,15 +253,24 @@ TEST_CASE("executor reports a locked source and continues independent moves") {
     REQUIRE(fixture::create_file(fx.dir.path(), L"locked.txt", "busy"));
     REQUIRE(fixture::create_file(fx.dir.path(), L"free.txt", "free"));
 
-    // Pre-existing DELETE-capable handle without FILE_SHARE_DELETE.
-    HANDLE held = ::CreateFileW((fx.dir.path() / L"locked.txt").c_str(), DELETE,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    REQUIRE(held != INVALID_HANDLE_VALUE);
-
+    // Scan and plan FIRST: the scanner itself opens candidates DELETE-capably
+    // and would (correctly) skip an already-locked entry, so the executor
+    // could never see it. The executor's Locked outcome models a lock that
+    // appears BETWEEN planning and execution - which is exactly the sequence
+    // exercised here.
     fx.scan = scan_directory(fx.guard.root);
     fx.plan = build_plan(fx.guard.root, fx.scan);
     REQUIRE(fx.plan.valid());
+
+    // A DELETE-capable handle without FILE_SHARE_DELETE: the executor's
+    // fresh source open must fail closed with a sharing violation.
+    HANDLE raw = ::CreateFileW((fx.dir.path() / L"locked.txt").c_str(), DELETE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(raw != INVALID_HANDLE_VALUE);
+    // RAII: the handle is released on every path (including REQUIRE aborts),
+    // so fixture cleanup can always delete the directory.
+    platform::unique_handle held{raw};
 
     const auto result = execute_plan(fx.plan, fx.dir.u8());
     REQUIRE(result.records.size() == 2);
@@ -264,7 +281,6 @@ TEST_CASE("executor reports a locked source and continues independent moves") {
     CHECK(result.failed_count == 1);
     // The locked file is still in the root, untouched.
     CHECK(file_exists_with_content(fx.dir.path() / L"locked.txt", "busy"));
-    ::CloseHandle(held);
 }
 
 TEST_CASE("executor aborts before any mutation when the root changed") {
@@ -379,4 +395,92 @@ TEST_CASE("rename primitive rejects invalid destination components up front") {
     // The source is untouched after all refusals.
     CHECK(std::filesystem::exists(fx.dir.path() / L"doc.pdf"));
     ::CloseHandle(source);
+}
+
+TEST_CASE("controlled A/B: Win32 class-3 vs native class-10 anchored rename") {
+    PlannedFixture fx{"exec-ab"};
+    REQUIRE(fx.guard.ok);
+    // Six identical source files: two for A, two for B, two spare.
+    for (int i = 0; i < 6; ++i) {
+        wchar_t name[32];
+        std::swprintf(name, 32, L"ab-%02d.txt", i);
+        REQUIRE(fixture::create_file(fx.dir.path(), name, "content-" + std::to_string(i)));
+    }
+    REQUIRE(fixture::create_directory(fx.dir.path(), L"Documents"));
+    fx.scan = scan_directory(fx.guard.root);
+    fx.plan = build_plan(fx.guard.root, fx.scan);
+    REQUIRE(fx.plan.valid());
+
+    auto cat = platform::open_category_directory(fx.guard.root.get(), "Documents", false);
+    REQUIRE(cat.ok);
+
+    // A: Win32 class 3 (expected FAIL error 87 on build 26300.9711).
+    {
+        auto src = platform::open_source(fx.guard.root.get(), "ab-00.txt");
+        REQUIRE(src.ok);
+        const auto r = platform::win32_rename_to_category(
+            src.handle.get(), cat.handle.get(), "win32-moved.txt");
+        MESSAGE("A win32 -> ", r.ok ? "SUCCESS" : "FAIL",
+                r.ok ? "" : " error " + std::to_string(r.native_code));
+        CHECK_FALSE(r.ok); // documented blocked path on this OS build
+        CHECK(r.native_code == 87);
+    }
+    // B: native class 10 (must SUCCEED - the decision gate).
+    {
+        auto src = platform::open_source(fx.guard.root.get(), "ab-01.txt");
+        REQUIRE(src.ok);
+        const auto r = platform::native_rename_to_category(
+            src.handle.get(), cat.handle.get(), "native-moved.txt");
+        REQUIRE(r.ok);
+        CHECK(r.native_code == 0); // NTSTATUS success, IoStatusBlock.Status 0
+    }
+    // B: unicode destination (narrow UTF-8 parameter, wide existence check).
+    {
+        auto src = platform::open_source(fx.guard.root.get(), "ab-02.txt");
+        REQUIRE(src.ok);
+        const auto r = platform::native_rename_to_category(
+            src.handle.get(), cat.handle.get(),
+            "\xE6\x96\x87\xE4\xBB\xB6.txt"); // 文件.txt
+        REQUIRE(r.ok);
+        CHECK(std::filesystem::exists(fx.dir.path() / L"Documents" /
+                                      L"\x6587\x4EF6.txt"));
+    }
+    // B: existing destination fails safely, both sides preserved.
+    {
+        REQUIRE(fixture::create_file(fx.dir.path() / L"Documents", L"native-conflict.txt",
+                                     "existing"));
+        auto src = platform::open_source(fx.guard.root.get(), "ab-03.txt");
+        REQUIRE(src.ok);
+        const auto r = platform::native_rename_to_category(
+            src.handle.get(), cat.handle.get(), "native-conflict.txt");
+        CHECK_FALSE(r.ok);
+        CHECK(r.failure == platform::NativeFailure::Conflict);
+        CHECK(fixture::file_content_matches(
+            fx.dir.path() / L"Documents" / L"native-conflict.txt", "existing"));
+        CHECK(fixture::file_content_matches(fx.dir.path() / L"ab-03.txt", "content-3"));
+    }
+    // B: long valid filename (255 UTF-16 code units).
+    {
+        auto src = platform::open_source(fx.guard.root.get(), "ab-04.txt");
+        REQUIRE(src.ok);
+        const std::string long_name(251, 'x'); // + ".txt" = 255 units
+        const auto r = platform::native_rename_to_category(
+            src.handle.get(), cat.handle.get(), long_name + ".txt");
+        REQUIRE(r.ok);
+        // The destination's full path exceeds MAX_PATH: plain std::filesystem
+        // calls cannot see it. Use the extended-length (\\?\) helpers.
+        CHECK(fixture::file_exists_extended(fx.dir.path() / L"Documents" /
+                                            (long_name + ".txt")));
+        CHECK(fixture::file_content_matches_extended(
+            fx.dir.path() / L"Documents" / (long_name + ".txt"), "content-4"));
+    }
+    // B: missing RootDirectory fails closed.
+    {
+        auto src = platform::open_source(fx.guard.root.get(), "ab-05.txt");
+        REQUIRE(src.ok);
+        const auto r = platform::native_rename_to_category(src.handle.get(), nullptr,
+                                                           "orphan.txt");
+        CHECK_FALSE(r.ok);
+        CHECK(r.failure == platform::NativeFailure::Other);
+    }
 }
