@@ -1,0 +1,74 @@
+# FolderPilot continuous integration.
+#
+# Purpose (Phase 6): repeatable regression testing that does not depend on
+# local Windows security policy. Smart App Control blocks freshly linked,
+# unsigned executables at launch on machines where it is On, which includes
+# this project's own test suite; a hosted Windows runner executes them
+# normally. This workflow runs only when pushed/triggered to a remote - it
+# is never invoked from a local machine, and creating this file does not
+# trigger anything by itself.
+#
+# The toolchain is the approved one: GCC via MSYS2 UCRT64, CMake + Ninja,
+# driven by the committed CMakePresets.json (debug and release).
+
+name: FolderPilot CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege: the workflow only checks out and builds - the token
+# needs no write access to anything.
+permissions:
+  contents: read
+
+jobs:
+  windows-tests:
+    name: Windows (UCRT64) - Debug and Release
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Configure (Debug)
+        run: cmake --preset debug
+
+      - name: Build (Debug)
+        run: cmake --build --preset debug
+
+      - name: Test (Debug)
+        run: ctest --preset debug --output-on-failure
+
+      - name: Configure (Release)
+        run: cmake --preset release
+
+      - name: Build (Release)
+        run: cmake --build --preset release
+
+      - name: Test (Release)
+        run: ctest --preset release --output-on-failure
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: folderpilot-test-logs
+          path: |
+            build/debug/Testing/LastTest.log
+            build/release/Testing/LastTest.log
+          if-no-files-found: warn

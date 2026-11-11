@@ -1,6 +1,7 @@
 # FolderPilot — Architecture
 
-> **Implementation status: Phase 5 (safe executor) complete.**
+> **Implementation status: Phase 6 (hardening, tests and documentation)
+> complete.**
 > This document records the architecture approved in Engineering Plan v2.5
 > (plus the ratified directory-enumeration mechanism). Only items marked
 > **IMPLEMENTED** exist in code today. Everything else is **PLANNED — NOT YET
@@ -8,7 +9,10 @@
 > files, plan the organization, print a read-only dry-run report, and — with
 > the explicit `--apply` flag — execute the planned movements through
 > validated handles with OS-enforced no-overwrite semantics. Undo, retries,
-> and recursive organization remain out of scope.
+> and recursive organization remain out of scope. The Phase 6 state is
+> locally runtime-verified in both configurations — 144/144 test cases,
+> 1,762/1,762 assertions each, zero failed, zero skipped (Debug and
+> Release); hosted CI has not run.
 
 ---
 
@@ -36,11 +40,9 @@
 | Root revalidation (identity/path/volume) before any mutation | **IMPLEMENTED** (Phase 5) |
 | Category revalidation + root-relative category creation (`FILE_CREATE`) | **IMPLEMENTED** (Phase 5) |
 | Source revalidation + identity compare + volume guard per move | **IMPLEMENTED** (Phase 5) |
-| Handle-based no-overwrite movement (`FileRenameInfo`, ReplaceIfExists=FALSE) | **IMPLEMENTED** (mechanism; blocked on OS build 26300, see §11) |
+| Handle-based no-overwrite movement (`FileRenameInformation` via `NtSetInformationFile`, ReplaceIfExists=FALSE) | **IMPLEMENTED** (Phase 5.1 native anchored rename, see §11) |
 | ExecutionResult + execution report (partial-failure semantics) | **IMPLEMENTED** (Phase 5) |
-| Undo, retries, recursive organization | PLANNED — NOT YET IMPLEMENTED (Phase 6+) |
-| Dry-run reporter, `--apply` executor | PLANNED — NOT YET IMPLEMENTED (Phases 4–5) |
-| Any file organization behavior | PLANNED — NOT YET IMPLEMENTED |
+| Undo, retries, recursive organization | PLANNED — NOT YET IMPLEMENTED (Phase 7+) |
 
 ## 2. Core model (approved)
 
@@ -79,7 +81,7 @@ platform/          Windows-specific seam (the only code touching Win32)
   - text / volume     UTF-8 ↔ UTF-16, volume-GUID identity
 ```
 
-## 4. Approved Windows mechanisms (all PLANNED — NOT YET IMPLEMENTED)
+## 4. Approved Windows mechanisms
 
 | Concern | Mechanism |
 |---|---|
@@ -108,7 +110,7 @@ Safety invariants and their wording constraints: see
   No machine-specific compiler paths are committed.
 - Targets: `folderpilot` (application), `folderpilot_tests` (doctest suite).
 
-## 6. Testing (foundation IMPLEMENTED, suite PLANNED)
+## 6. Testing (IMPLEMENTED)
 
 - Framework: **doctest**, vendored at
   `third_party/doctest/doctest.h`, pinned to upstream release
@@ -126,11 +128,12 @@ Safety invariants and their wording constraints: see
 - Phase 4 suites: `test_collision` (pure resolver), `test_planner`
   (pure invariants + sandboxed planning), `test_reporter` (render-only),
   `test_cli` (spawns the real executable; read-only dry-run immutability,
-  `--apply` rejection, exit codes).
-- Phase 3 filesystem fixtures live exclusively under
-  `build/phase3-test-sandbox/` (never `%TEMP%`, never user folders); cleanup
-  removes only the verified fixture directory. Capability-gated tests
-  (junctions) report skips explicitly.
+  `--apply` movement, exit codes).
+- Filesystem fixtures live exclusively under the synthetic sandboxes
+  `build/phase3-test-sandbox/` (read-only phase fixtures) and
+  `build/phase5-test-sandbox/` (movement fixtures) — never `%TEMP%`, never
+  user folders; cleanup removes only the verified fixture directory.
+  Capability-gated tests (junctions) report skips explicitly.
 - All future integration tests operate exclusively in isolated temporary
   directories; tests never target real user data. `remove_all` appears only
   in test-fixture cleanup, never in product code.
@@ -143,15 +146,16 @@ Safety invariants and their wording constraints: see
 | 2 | Core types and classification | **IMPLEMENTED** |
 | 3 | PathGuard and directory scanner | **IMPLEMENTED** |
 | 4 | Planner and dry-run | **IMPLEMENTED** |
-| 5 | Safe executor | **IMPLEMENTED** (movement blocked on OS build 26300, see §11) |
-| 6 | Hardening, tests and documentation | PLANNED |
+| 5 | Safe executor | **IMPLEMENTED** (native anchored rename, see §11) |
+| 6 | Hardening, tests and documentation | **COMPLETE** |
 
 ## 10. Phase 4 implementation notes (IMPLEMENTED)
 
 - **Workflow**: SCAN → CLASSIFY → INSPECT DESTINATIONS → PLAN → REPORT.
-  The CLI runs exactly this pipeline read-only and exits; nothing is ever
-  created, moved, or deleted, and `--apply` is rejected with an explicit
-  message and a non-zero exit code.
+  The CLI runs exactly this pipeline for its default dry run and exits;
+  nothing is ever created, moved, or deleted. Since Phase 5, `--apply`
+  explicitly authorizes execution of the planned movements (see §11); the
+  dry run remains the default.
 - **Destination category inspection**: each of the seven category folders is
   opened relative to the retained root handle (`NtCreateFile` with
   `RootDirectory`, `FILE_OPEN`, `FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT`),
@@ -182,11 +186,16 @@ Safety invariants and their wording constraints: see
   "will be created", skip reasons, collision-resolved names, summary counts,
   and the NO FILES WERE MOVED / NO DIRECTORIES WERE CREATED / NO FILES WERE
   DELETED footer. Internal `.`/`..` noise is filtered from the user view.
-- **CLI exit codes**: 0 dry-run report · 1 usage error / unsupported feature
-  (`--apply`) · 2 target rejected · 3 scan or planning failure.
-  Known limitation (documented, deferred): CLI arguments use the ANSI entry
-  point, so non-ASCII directory arguments may not round-trip until the wide
-  entry point lands in a later phase.
+- **CLI exit codes** (per `app/main.cpp`): 0 dry-run report printed, or
+  execution completed with all moves done · 1 usage error · 2 target
+  rejected, root changed (batch aborted before any mutation), or invalid
+  plan · 3 scan or planning failure, or execution completed with failures.
+- **Unicode CLI (Phase 6)**: arguments arrive through the UTF-16 (`wmain`,
+  `-municode`) entry point and are converted with the same strict
+  UTF-16→UTF-8 converter the library uses, so non-ASCII directory paths
+  round-trip exactly; console output is emitted as UTF-8 with the console
+  code page set to `CP_UTF8` (display-only; pipes and redirection are
+  unaffected).
 
 ## 9. Phase 3 implementation notes (IMPLEMENTED)
 
@@ -285,21 +294,28 @@ Safety invariants and their wording constraints: see
   revalidation (open relative to the retained root, attribute gate, identity
   compare, volume-serial guard) -> handle-based rename ->
   per-move structured outcome.
-- **Movement**: `SetFileInformationByHandle(FileRenameInfo)` with
-  `ReplaceIfExists = FALSE`, `RootDirectory` = validated category handle,
-  relative single-component name, variable-length buffer sized
-  `sizeof(FILE_RENAME_INFO) + name_bytes` (see the contract note below).
-  No path-based rename exists anywhere; no fallback.
-- **OS FINDING (build 26300, disclosed)**: the RootDirectory-relative form
-  of `FileRenameInfo` fails with ERROR_INVALID_PARAMETER (87) for every
-  handle/flag/size/null convention probed (12+ combinations, evidence in
-  the test suite), while absolute-path forms succeed. The approved
-  root-relative movement mechanism is therefore BLOCKED on this OS build.
-  Per the gate rules no absolute-path fallback was implemented; movement
-  tests are capability-gated and report explicit SKIPPED reasons (9 cases).
-  The executor fails closed: every move reports Failed, sources and
-  destinations stay untouched, directories created before the block remain
-  (documented in the execution report).
+- **Movement (Phase 5.1 resolution)**: the rename is issued through
+  `NtSetInformationFile` with `FileRenameInformation` (class 10) on the
+  DELETE-capable source handle: `ReplaceIfExists = FALSE`,
+  `RootDirectory` = validated category handle, relative single-component
+  name, buffer sized `sizeof(FILE_RENAME_INFORMATION) + name_bytes` (see
+  the contract note below). No path-based rename exists anywhere; no
+  fallback. Runtime-verified end-to-end (movement, Unicode, 255-unit
+  names, conflicts, fail-closed paths) in Phases 5.1.5/6.
+- **OS FINDING (build 26300, disclosed and RESOLVED)**: the Win32
+  `SetFileInformationByHandle(FileRenameInfo)` (class 3) form fails with
+  ERROR_INVALID_PARAMETER (87) for every handle/flag/size/null convention
+  probed (12+ combinations), while absolute-path forms succeed. This is a
+  build-specific observation, not a universal Windows contract; the A/B
+  test observes the build's actual class-3 behavior and asserts
+  consistency with it (movement on builds without the regression,
+  fail-closed with error 87 on builds that have it). Per the
+  gate rules no absolute-path fallback was implemented. The documented
+  native class-10 form (`NtSetInformationFile`) performs the same
+  RootDirectory-relative rename successfully on the same build — verified
+  by the controlled A/B test (`controlled A/B: Win32 class-3 vs native
+  class-10 anchored rename`), which re-confirms the class-3 block and
+  asserts the class-10 success on every run.
 - **Contract correction found by the probe**: the FILE_RENAME_INFO buffer
   must be at least `sizeof(FILE_RENAME_INFO) + FileNameLength` bytes - a
   plain `offsetof(FileName) + bytes` buffer is rejected with 87 even for

@@ -2,6 +2,9 @@
 build/
 out/
 
+# --- ZCode harness-local state (never project content) -----------------
+.zcode/
+
 # --- Local, machine-specific CMake overrides --------------------------
 CMakeUserPresets.json
 

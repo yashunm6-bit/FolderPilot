@@ -414,16 +414,41 @@ TEST_CASE("controlled A/B: Win32 class-3 vs native class-10 anchored rename") {
     auto cat = platform::open_category_directory(fx.guard.root.get(), "Documents", false);
     REQUIRE(cat.ok);
 
-    // A: Win32 class 3 (expected FAIL error 87 on build 26300.9711).
+    // A: Win32 class 3 — the test OBSERVES the build's actual behavior and
+    // asserts report-vs-reality consistency in both documented outcomes; it
+    // never assumes which one occurs. On build 26300.9711 the
+    // RootDirectory-relative class-3 form fails with ERROR_INVALID_PARAMETER
+    // (87) (documented OS observation, docs/ARCHITECTURE.md §11 — specific
+    // to that build, not a universal Windows contract); on builds without
+    // that regression the same call is an ordinary anchored rename and must
+    // REALLY move the file. Any other failure is undocumented and fails the
+    // test with its specifics.
     {
         auto src = platform::open_source(fx.guard.root.get(), "ab-00.txt");
         REQUIRE(src.ok);
         const auto r = platform::win32_rename_to_category(
             src.handle.get(), cat.handle.get(), "win32-moved.txt");
-        MESSAGE("A win32 -> ", r.ok ? "SUCCESS" : "FAIL",
+        MESSAGE("A win32 class-3 -> ", r.ok ? "SUCCESS" : "FAIL",
                 r.ok ? "" : " error " + std::to_string(r.native_code));
-        CHECK_FALSE(r.ok); // documented blocked path on this OS build
-        CHECK(r.native_code == 87);
+        if (r.ok) {
+            // A claimed success must be a real anchored move.
+            CHECK(r.native_code == 0);
+            CHECK(fixture::file_content_matches(
+                fx.dir.path() / L"Documents" / L"win32-moved.txt", "content-0"));
+            CHECK_FALSE(std::filesystem::exists(fx.dir.path() / L"ab-00.txt"));
+        } else if (r.native_code == 87) {
+            // The documented build-26300 block: fail closed, both sides
+            // untouched.
+            CHECK(fixture::file_content_matches(
+                fx.dir.path() / L"ab-00.txt", "content-0"));
+            CHECK_FALSE(std::filesystem::exists(fx.dir.path() / L"Documents" /
+                                                L"win32-moved.txt"));
+        } else {
+            CHECK_MESSAGE(false,
+                          "Win32 class-3 anchored rename failed with an "
+                          "undocumented error (native_code=",
+                          std::to_string(r.native_code), "; ", r.error, ")");
+        }
     }
     // B: native class 10 (must SUCCEED - the decision gate).
     {

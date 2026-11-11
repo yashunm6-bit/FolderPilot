@@ -1,4 +1,4 @@
-// FolderPilot - application entry point (Phase 5: dry-run + --apply).
+// FolderPilot - application entry point (Phase 6: dry-run + --apply).
 //
 //   folderpilot <directory>            read-only dry run (default)
 //   folderpilot <directory> --apply    execute the planned movements
@@ -14,9 +14,17 @@
 //   2  safety rejection (target refused, root changed, invalid plan)
 //   3  scan or planning failed / execution completed with failures
 //
-// Known limitation (deferred to a later phase): command-line arguments are
-// read through the ANSI entry point, so non-ASCII directory arguments may
-// not round-trip on every system. Library-level Unicode is fully supported.
+// Arguments arrive through the UTF-16 (wmain) entry point and are converted
+// to UTF-8 with the same strict converter the library uses, so non-ASCII
+// directory paths round-trip exactly (Phase 6 Unicode CLI support).
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
 
 #include <iostream>
 #include <string>
@@ -27,6 +35,7 @@
 #include "folderpilot/planner.hpp"
 #include "folderpilot/reporter.hpp"
 #include "folderpilot/scanner.hpp"
+#include "text.hpp"
 
 namespace {
 
@@ -46,8 +55,28 @@ int print_usage() {
 
 } // namespace
 
-int main(int argc, char** argv) {
-    const std::vector<std::string> args(argv, argv + argc);
+int wmain(int argc, wchar_t* argv[]) {
+    // Console output code page: the reporter emits UTF-8. Without this, a
+    // legacy-codepage console renders non-ASCII paths as mojibake. Display
+    // only - pipes, redirection and the test harness's pipe capture are
+    // unaffected, and the emitted bytes are identical either way.
+    ::SetConsoleOutputCP(CP_UTF8);
+
+    // Strict UTF-16 -> UTF-8 conversion of every command-line argument: the
+    // library's UTF-8 interfaces receive the exact command-line text. A
+    // conversion failure is not expected for well-formed Windows arguments
+    // and fails closed as a usage error.
+    std::vector<std::string> args;
+    args.reserve(static_cast<std::size_t>(argc > 0 ? argc : 0));
+    for (int i = 0; i < argc; ++i) {
+        const auto converted =
+            folderpilot::platform::to_utf8(std::wstring_view{argv[i]});
+        if (!converted.ok) {
+            std::cout << "Argument cannot be represented in UTF-8; rejected.\n";
+            return print_usage();
+        }
+        args.push_back(std::move(converted.value));
+    }
 
     std::string directory;
     bool apply = false;

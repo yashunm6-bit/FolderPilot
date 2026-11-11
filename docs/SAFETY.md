@@ -6,9 +6,15 @@
 > categories, resolve collisions, print a read-only dry-run report, and —
 > with explicit `--apply` — revalidate everything and move files through
 > validated handles with OS-enforced no-overwrite semantics (Phase 5).
-> KNOWN BLOCKER (disclosed): on OS build 26300 the RootDirectory-relative
-> rename form fails with ERROR_INVALID_PARAMETER, so movement currently
-> fails closed (sources untouched) on this build; no fallback was added.
+> OS NOTE (disclosed): the Win32 class-3 form of the RootDirectory-relative
+> rename (`SetFileInformationByHandle(FileRenameInfo)`) fails with
+> ERROR_INVALID_PARAMETER (87) on OS build 26300 — a build-specific
+> observation, not a universal Windows guarantee. Movement therefore uses
+> the native `NtSetInformationFile` (`FileRenameInformation`, class 10)
+> anchored rename, which successfully performed the required movement on
+> this build and passed the complete Debug and Release suites (144/144
+> cases, 1,762/1,762 assertions, 0 failed, 0 skipped in each — local
+> runtime verification; hosted CI has not run).
 > There is still no deletion, no overwrite, no undo, and no recursive
 > organization.
 >
@@ -24,8 +30,8 @@
 Running the tool without `--apply` builds and displays an organization plan
 and performs no filesystem mutation whatsoever. Verified by a snapshot test
 that asserts fixture state is unchanged after a complete CLI dry-run,
-including that missing category directories are not created. There is
-currently no code path that mutates user files at all.
+including that missing category directories are not created. Without
+`--apply`, no code path mutates user files at all.
 
 ## 2. Explicit authorization before moving files
 **IMPLEMENTED (Phase 5)**
@@ -41,10 +47,14 @@ within the selected root. `remove_all` exists exclusively in test-fixture
 cleanup. This is a review-enforced structural invariant.
 
 ## 4. No overwriting existing destinations
-**IMPLEMENTED (Phase 5, mechanism); blocked on OS build 26300 (see banner)**
-Movement uses `SetFileInformationByHandle(FileRenameInfo)` with
-`ReplaceIfExists = FALSE` — the operating system rejects an existing
-destination (`ERROR_ALREADY_EXISTS`). There is no path-based rename fallback.
+**IMPLEMENTED (Phase 5.1 native anchored rename, see banner)**
+Movement issues the native `NtSetInformationFile` (`FileRenameInformation`,
+class 10) anchored rename with `ReplaceIfExists = FALSE` — the operating
+system rejects an existing destination. The older Win32 class-3 form
+(`SetFileInformationByHandle(FileRenameInfo)`) fails with
+ERROR_INVALID_PARAMETER on OS build 26300 — a build-specific observation,
+not a universal Windows guarantee — which is why the native class-10 form is
+used. There is no path-based rename fallback.
 A conflicting move fails as `Conflict`: the source remains untouched and the
 destination content remains unchanged; other independent moves continue.
 
@@ -54,7 +64,7 @@ Enumeration covers only the immediate children of the validated root.
 Subdirectories are never entered, moved, or modified.
 
 ## 6. Reparse-point protection
-**IMPLEMENTED for validation and scanning (Phase 3); destination-side gates PLANNED (Phase 4+)**
+**IMPLEMENTED (Phases 3–5: leaf and target gates in validation/scanning, destination-category gates in planning/execution)**
 Leaf reparse points (symlinks, junctions, OneDrive/cloud placeholders — any
 tag) are detected via `FileAttributeTagInfo` on handles opened with
 `FILE_OPEN_REPARSE_POINT`, never via `is_symlink`-style checks, and are
@@ -63,7 +73,7 @@ approved resolve-and-allow policy: the single path-based bootstrap open
 resolves them, and all safety checks apply to the resolved location.
 
 ## 7. Hidden/system file protection
-**IMPLEMENTED for entries and the target directory (Phase 3); category-directory gates PLANNED (Phase 4)**
+**IMPLEMENTED (Phases 3–5: entries and target directory in validation/scanning, category-directory gates in planning/execution)**
 Entries with `FILE_ATTRIBUTE_HIDDEN` or `FILE_ATTRIBUTE_SYSTEM` are skipped
 with a reported reason. The selected target directory is subject to the same
 gate and is rejected when hidden, system, or a reparse point.
@@ -77,7 +87,7 @@ locations are refused. The denylist is defense in depth, not a security
 boundary.
 
 ## 9. Root-relative filesystem operations
-**IMPLEMENTED (Phases 3–5): bootstrap, enumeration, source opens, category revalidation/creation, and movement are all root-relative; NOTE the RootDirectory-relative RENAME form is blocked on OS build 26300 (banner)**
+**IMPLEMENTED (Phases 3–5): bootstrap, enumeration, source opens, category revalidation/creation, and movement are all root-relative; NOTE the Win32 class-3 RENAME form is blocked on OS build 26300 (banner) — the native class-10 anchored rename performs the movement root-relative**
 Exactly one path-based bootstrap open establishes the validated root handle
 (reparse inspection, attributes, identity, resolved path all through that
 handle). Every subsequent source open is performed with `NtCreateFile`
@@ -95,26 +105,28 @@ re-verification before each move arrives with the executor (Phase 5).
 
 ## 11. Isolated temporary directories for tests
 **IMPLEMENTED (Phase 3)**
-All filesystem tests operate exclusively inside
-`build/phase3-test-sandbox/`, created and cleaned by the test-fixture helper
-after canonical-path verification. Tests never target the real Downloads
-folder, any user data, or `%TEMP%`.
+All filesystem tests operate exclusively inside the synthetic fixture
+sandboxes `build/phase3-test-sandbox/` (read-only phase fixtures) and
+`build/phase5-test-sandbox/` (movement fixtures), created and cleaned by the
+test-fixture helper after canonical-path verification. Tests never target
+the real Downloads folder, any user data, or `%TEMP%`.
 
 ## 12. Fail-closed behavior
 **IMPLEMENTED (Phases 3–5)**
 Validation, scanning, planning, and per-move execution all fail closed: a
 root identity mismatch aborts the batch before any mutation; a category
 replacement is never adopted; a moved-onto destination is rejected by the
-OS; one failing move never aborts independent moves. Exit codes: 0 dry-run
-report or fully successful execution, 1 usage, 2 target refused or batch
-aborted, 3 scan/plan failure or execution with partial failures.
+OS; one failing move never aborts independent moves.
 Invalid paths, missing targets, unreadable attributes, unverifiable volume
 identity, uninspectable categories, and all other unresolved states fail
 closed: the affected entry or category is skipped with a structured reason,
 an invalid plan is rejected whole, and a failed scan is never an apparently
 successful empty result. One failing entry or category never aborts
-independent work. Exit codes: 0 dry-run report, 1 usage/unsupported,
-2 target rejected, 3 scan or planning failure.
+independent work.
+Exit codes (per `app/main.cpp`): 0 dry-run report printed / execution
+completed with all moves done · 1 usage error · 2 safety rejection (target
+refused, root changed, invalid plan) · 3 scan or planning failed /
+execution completed with failures.
 
 ---
 

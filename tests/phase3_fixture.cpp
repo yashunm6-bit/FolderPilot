@@ -449,7 +449,20 @@ CliRun run_folderpilot_cli(const std::vector<std::wstring>& arguments) {
                                  : std::string_view{FOLDERPILOT_EXE_PATH}).value;
     std::wstring command = L"\"" + exe + L"\"";
     for (const std::wstring& argument : arguments) {
-        command += L" \"" + argument + L"\"";
+        // Windows argv parsing treats backslashes before the closing quote
+        // as escape sequences: 2n backslashes + quote end the argument with
+        // n literal backslashes. Double any trailing backslashes so an
+        // argument that ends with one survives the parse round-trip (Phase
+        // 6.5; a target like "C:\...\dir\" previously arrived at the CLI
+        // with its closing quote eaten and was rejected as invalid).
+        std::wstring quoted = argument;
+        std::size_t trailing = 0;
+        while (trailing < quoted.size() &&
+               quoted[quoted.size() - 1 - trailing] == L'\\') {
+            ++trailing;
+        }
+        quoted.append(trailing, L'\\');
+        command += L" \"" + quoted + L"\"";
     }
 
     SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};

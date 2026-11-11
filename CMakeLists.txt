@@ -86,6 +86,13 @@ target_link_libraries(folderpilot_platform PUBLIC folderpilot_build_options)
 add_executable(folderpilot
     app/main.cpp
 )
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND WIN32)
+    # Phase 6 Unicode CLI support: the UTF-16 (wmain) entry point. A narrow
+    # main() receives ANSI-converted arguments, mangling non-ASCII directory
+    # paths before the library ever sees them.
+    target_compile_options(folderpilot PRIVATE -municode)
+    target_link_options(folderpilot PRIVATE -municode)
+endif()
 target_compile_definitions(folderpilot PRIVATE
     FOLDERPILOT_VERSION="${PROJECT_VERSION}"
 )
@@ -93,6 +100,12 @@ target_link_libraries(folderpilot PRIVATE
     folderpilot_build_options
     folderpilot_core
 )
+
+# ---------------------------------------------------------------------------
+# Install rules (Phase 6 packaging): a release distribution is the single
+# statically linked executable; the test suite is never installed.
+# ---------------------------------------------------------------------------
+install(TARGETS folderpilot RUNTIME DESTINATION bin)
 
 # ---------------------------------------------------------------------------
 # Testing: CTest wiring; the test targets live in tests/.

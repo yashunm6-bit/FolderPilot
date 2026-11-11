@@ -105,3 +105,47 @@ TEST_CASE("CLI dry-run still changes nothing after Phase 5") {
     CHECK(snapshots_equal(before, after));
     CHECK_FALSE(std::filesystem::exists(dir.path() / L"Documents"));
 }
+
+TEST_CASE("CLI accepts a target argument with a trailing backslash") {
+    // Phase 6.5 regression: Windows argv parsing eats the closing quote of
+    // an argument that ends with a backslash unless the quoting doubles it.
+    // Pre-fix the CLI received the path with a literal quote appended and
+    // rejected it (safe, but wrong); post-fix the path round-trips exactly.
+    // The library itself accepts a trailing separator on a directory target.
+    SandboxDir dir{"cli-trailing-bs"};
+    REQUIRE(fixture::create_file(dir.path(), L"resume.pdf", "r"));
+
+    std::wstring arg = wide_path(dir);
+    REQUIRE(arg.back() != L'\\');
+    arg += L'\\'; // simulate a user-provided trailing separator
+
+    const auto run = run_folderpilot_cli({arg});
+    CHECK(run.exit_code == 0);
+    CHECK(run.output.find("FOLDERPILOT - DRY RUN") != std::string::npos);
+    CHECK(run.output.find("resume.pdf -> Documents/resume.pdf") != std::string::npos);
+    // Dry-run default: nothing was created or moved.
+    CHECK_FALSE(std::filesystem::exists(dir.path() / L"Documents"));
+}
+
+TEST_CASE("CLI accepts a Unicode target directory argument") {
+    // Phase 6 deferred-work item: the ANSI entry point mangled non-ASCII
+    // command-line arguments, so a Unicode target path arrived at the
+    // library with replacement characters and PathGuard rejected it. With
+    // the UTF-16 (wmain) entry point the whole argument round-trips into
+    // the report. Dry-run only: never mutates anything.
+    SandboxDir dir{"cli-unicode-arg"};
+    const std::wstring sub = L"\x00FCn\x00EFcode \x6587\x4EF6\x5939"; // ünïcode 文件夹
+    REQUIRE(fixture::create_directory(dir.path(), sub));
+    REQUIRE(fixture::create_file(dir.path() / sub, L"resume.pdf", "u"));
+
+    const auto run = run_folderpilot_cli({wide_path(dir) + L"\\" + sub});
+    CHECK(run.exit_code == 0);
+    CHECK(run.output.find("FOLDERPILOT - DRY RUN") != std::string::npos);
+    // The target path round-tripped through the command line and the report.
+    const auto sub_u8 = folderpilot::platform::to_utf8(sub);
+    REQUIRE(sub_u8.ok);
+    CHECK(run.output.find(sub_u8.value) != std::string::npos);
+    CHECK(run.output.find("resume.pdf -> Documents/resume.pdf") != std::string::npos);
+    // Dry-run default: nothing was created or moved.
+    CHECK_FALSE(std::filesystem::exists(dir.path() / sub / L"Documents"));
+}
