@@ -3,12 +3,16 @@
 > **STATUS: Phase 6 (hardening, tests and documentation) — implementation,
 > local runtime verification, and formal acceptance COMPLETE; the
 > implementation and documentation changes are committed and pushed
-> (`7f4a9db` "windows cl test", on `origin/main`).** Hosted CI has run once
-> (2026-11-11, run `43052752854`, commit `7f4a9db`): success at the
-> workflow/job/CTest-step level; its exact test counts are not verifiable —
-> see §3–§4. Smart App Control was temporarily Off during the authorized
-> local runtime-verification window; its state outside that window is not
-> claimed by this record. Record date: 2026-11-11.
+> (`origin/main` = `4fd157d` "fix: ensure CI test logs are uploaded",
+> following `7f4a9db` "windows cl test").** Hosted CI has run twice
+> (2026-11-11): `43052752854` (commit `7f4a9db`) succeeded but uploaded no
+> artifact (wrong CTest log path, since fixed), and `43068578754` (commit
+> `4fd157d`) succeeded AND created the verified `folderpilot-test-logs`
+> artifact; exact hosted test counts remain unverifiable (artifact contents
+> require authentication) — see §3–§4. Smart App Control was temporarily
+> Off during the authorized local runtime-verification window; its state
+> outside that window is not claimed by this record. Record date:
+> 2026-11-11.
 
 ---
 
@@ -22,7 +26,7 @@ present in the current working tree:
 |---|---|---|
 | Unicode CLI (the known Phase 5 deferred-work item) | UTF-16 entry point: `wmain` plus `-municode` (GNU/Win32 only, compile and link); every command-line argument converted with the library's strict UTF-16→UTF-8 converter, failing closed as a usage error on non-representable input; console output code page set to `CP_UTF8` (display-only — pipes, redirection, and test-harness capture are unaffected) | `app/main.cpp:58-77`, `CMakeLists.txt:89-96` |
 | Packaging | Install rule copying only the application binary (`install(TARGETS folderpilot RUNTIME DESTINATION bin)`); README documents the static runtime linking and the install command; the static-linking claim was verified against the binary import table (KERNEL32 + api-ms-win-crt-* only) | `CMakeLists.txt:104-109`, `README.md:75-83` |
-| CI workflow | `.github/workflows/ci.yml`: Windows runner, MSYS2 UCRT64 (gcc/cmake/ninja), committed presets configure→build→test in Debug and Release; least-privilege `permissions: contents: read`; push/PR triggers scoped to `main`; test-log artifacts upload `if: always()`. It runs only when pushed/triggered to a remote — creating the file triggers nothing. First hosted run: 2026-11-11, run `43052752854` (push of `7f4a9db` to `main`) — success; see §3 and §4 | `.github/workflows/ci.yml` |
+| CI workflow | `.github/workflows/ci.yml`: Windows runner, MSYS2 UCRT64 (gcc/cmake/ninja), committed presets configure→build→test in Debug and Release; least-privilege `permissions: contents: read`; push/PR triggers scoped to `main`; test-log artifacts upload `if: always()`. It runs only when pushed/triggered to a remote — creating the file triggers nothing. Hosted runs (2026-11-11): `43052752854` — success, no artifact (upload path lacked `Temporary/`, fixed in `4fd157d`); `43068578754` — success, artifact created and verified; see §3 and §4 | `.github/workflows/ci.yml` |
 | Tests | New CLI regression cases: Unicode target round-trip and trailing-backslash argument; the controlled A/B rename test reworked to observe the build's actual class-3 behavior and assert report-vs-reality consistency in both documented outcomes instead of assuming error 87; CLI harness argv quoting hardened | `tests/unit/test_cli5.cpp:109-151`, `tests/unit/test_executor.cpp:400-511`, `tests/phase3_fixture.cpp:449-467` |
 | Documentation | README: Phase 6 status, exit codes per `app/main.cpp`, Unicode bullet, packaging section, Smart App Control regression-testing guidance, direct-CMake fallback forms with explicit build types, neutral exit-127 note. ARCHITECTURE.md: §1/§4/§6/§7 status refresh, §8 exit codes and Unicode CLI bullet, §11 OS-finding wording ("build-specific observation, not a universal Windows contract"). SAFETY.md: §6/§7 invariant status markers updated | `README.md`, `docs/ARCHITECTURE.md`, `docs/SAFETY.md:57,66` |
 
@@ -100,11 +104,14 @@ binaries — 144 cases):
 | Executor movement, no-overwrite, fail-closed | `CLI --apply moves files and leaves the root clean of sources`; `CLI --apply replans on every invocation: an injected conflict is re-reserved, never overwritten`; `executor reports a conflict when the destination exists and preserves both sides`; `executor rejects a source replaced after planning`; `executor reports a source that vanished after planning`; `executor reports a locked source and continues independent moves`; `executor rejects a category directory replaced after planning`; `batch error isolation: one locked file does not affect later batches`; `root handle moves correctly and the moved-from value is inert`; `CLI dry-run still changes nothing after Phase 5` |
 | Phase 1–5 regression | The run was complete and unfiltered (no `-tc` filter, zero skips): scanner, planner, classifier, PathGuard, text, handle, reporter, collision, and native suites are all inside the 144 cases |
 
-### Hosted results (GitHub Actions run 43052752854) — layered evidence
+### Hosted results — layered evidence (two runs, 2026-11-11)
 
 Retrieved 2026-11-11 via the GitHub Actions API (anonymous, read-only; `gh`
 is not installed and nothing was installed). **A workflow/job success alone
-does not establish test-case counts** — the layers are stated separately:
+does not establish test-case counts** — the layers are stated separately,
+per run:
+
+**Run 1 — `43052752854` (commit `7f4a9db`, push): success, NO artifact.**
 
 | Layer | Evidence | Source |
 |---|---|---|
@@ -114,28 +121,57 @@ does not establish test-case counts** — the layers are stated separately:
 | CTest | The Test steps run `ctest --preset <debug/release> --output-on-failure`; `ctest` exits non-zero on any failing test, so the succeeding Test steps establish hosted CTest completed **without failing tests** in both configurations — inferred from step outcomes; the ctest output itself was not retrievable | Inference from step results |
 | doctest case/assertion counts | **NOT VERIFIED — no claim.** The run's artifact list is empty (HTTP 200, `total_count: 0`): the `folderpilot-test-logs` artifact does not exist, so there is nothing to download and no hosted case/assertion counts can be quoted. Job logs require repository-admin authentication (anonymous attempt: HTTP 403). The "Upload test logs" step's success is not evidence of an upload — `if-no-files-found: warn` permits an empty search to succeed | API + failed retrieval |
 
-- Artifact-to-commit verification is impossible: no artifact exists for the
-  run. Preset `binaryDir`s (`build/debug`, `build/release`, per
-  `CMakePresets.json:10,20`) match the workflow's upload paths, so the
-  empty-artifact cause is not determinable without authenticated access;
-  any workflow change would need separate authorization.
-- **Hosted ≠ this machine's OS build.** The runner is `windows-latest`; its
-  exact Windows build is not verified here, and nothing in this record
-  claims hosted CI verifies behavior on this machine's build 26300. The
-  hosted A/B test's class-3 branch outcome (success vs the documented
-  error-87 fail-closed branch) is not observable from outside — the test
-  asserts consistency with whichever outcome occurred.
+**Root cause (established locally after run 1):** CTest writes its log to
+`<binaryDir>/Testing/Temporary/LastTest.log` — verified in both local build
+trees (1,536 / 1,540 bytes; no `Testing/LastTest.log` exists anywhere) —
+while the workflow uploaded `<binaryDir>/Testing/LastTest.log`, a path that
+never exists. With `if-no-files-found: warn` the upload step succeeded
+while uploading nothing. (The runner's own warning text remained
+inaccessible — job logs require repository-admin authentication, HTTP 403 —
+so the diagnosis rests on the local path evidence plus the empty artifact
+listing.) Commit `4fd157d` ("fix: ensure CI test logs are uploaded")
+corrected the workflow: upload paths fixed to `Testing/Temporary/`, a
+pre-upload existence-verification step added (fails loudly with per-file
+diagnostics), `if-no-files-found: error`, `retention-days: 14` — no
+application or test code changed.
+
+**Run 2 (current) — `43068578754` (commit `4fd157d`, push): success, artifact created.**
+
+| Layer | Evidence | Source |
+|---|---|---|
+| Workflow | Run `43068578754` "FolderPilot CI" — event `push` to `main`, head SHA `4fd157d864b936b4b0e6f2c37716162c9d2a4b5e`, attempt 1, created 2026-11-11T17:28:56Z, **conclusion `success`** at 17:31:07Z | Actions API |
+| Job | "Windows (UCRT64) - Debug and Release" (`windows-latest` runner, MSYS2 UCRT64) — **success** (17:29:00Z–17:31:06Z) | Actions API |
+| Steps | All green: checkout, MSYS2 setup, Configure/Build/**Test** (Debug), Configure/Build/**Test** (Release), **Verify test logs exist → success**, **Upload test logs → success**, post steps | Actions API |
+| CTest | The Test steps succeeded ⇒ `ctest` exited 0 in both configurations (inferred from step outcomes; the ctest output itself was not retrievable) | Inference from step results |
+| Artifact | **`folderpilot-test-logs` created** — ID `13876723467`, 1,272 bytes, `expired: false`; artifact metadata `head_sha` matches commit `4fd157d864b936b4b0e6f2c37716162c9d2a4b5e` exactly | Actions API |
+| doctest case/assertion counts | **NOT VERIFIED — no claim.** The artifact's *contents* are not anonymously readable (ZIP download: HTTP 401 — authentication required), so the hosted `LastTest.log` files and their doctest summaries could not be inspected in this session | Failed retrieval |
+
+Run 2 changed only the artifact-collection mechanics (commit `4fd157d`
+touches `ci.yml`, `README.md`, and two docs files — no application or test
+code), so it additionally evidences that the same Debug/Release
+configure→build→test pipeline passes with the corrected upload and that the
+log-verification guard works on a real runner.
+
+- **Hosted ≠ this machine's OS build (both runs).** The runner is
+  `windows-latest`; its exact Windows build is not verified here, and
+  nothing in this record claims hosted CI verifies behavior on this
+  machine's build 26300. The hosted A/B test's class-3 branch outcome
+  (success vs the documented error-87 fail-closed branch) is not observable
+  from outside — the test asserts consistency with whichever outcome
+  occurred.
 
 ## 4. Explicitly not claimed / open items
 
-- **Hosted CI — verified at the workflow/job/CTest-step level only; exact
-  hosted test counts are NOT verifiable.** Run `43052752854` ("FolderPilot
-  CI", push to `main`, commit `7f4a9db`) concluded `success`; job
-  `130634019902` succeeded with all steps green. The run's artifact list is
-  empty and job logs require repository-admin authentication, so no hosted
-  doctest case/assertion counts can be quoted — layered evidence and limits
-  in §3 ("Hosted results"). Hosted CI does not verify this machine's
-  build-26300 behavior (§3).
+- **Hosted CI — verified at the workflow/job/CTest-step level plus artifact
+  EXISTENCE and metadata; exact hosted test counts are still NOT verifiable.**
+  Run `43052752854` (commit `7f4a9db`) succeeded but uploaded no artifact
+  (wrong CTest log path — see §3); the corrected workflow in `4fd157d`
+  produced run `43068578754`, which succeeded AND created the
+  `folderpilot-test-logs` artifact (ID `13876723467`, 1,272 bytes, not
+  expired, metadata SHA == commit `4fd157d`). The artifact's *contents*
+  require authentication (HTTP 401 anonymously), so no hosted doctest
+  case/assertion counts can be quoted — layered evidence in §3. Hosted CI
+  does not verify this machine's build-26300 behavior (§3).
 - **Smart App Control state is not claimed.** SAC was temporarily Off during
   the authorized verification window (a user action outside this repository).
   Its state after the window is not verified by this record; re-enabling it
@@ -149,36 +185,36 @@ does not establish test-case counts** — the layers are stated separately:
   establishes that the preset commands worked in that environment — the
   local exit-127 issue is not resolved by it.
 - **Commit state.** The Phase 6 implementation and documentation changes are
-  committed and pushed (`7f4a9db` "windows cl test" on `origin/main`,
-  live-verified 2026-11-11 via `git ls-remote`). The hosted-evidence
-  documentation amendment (this update, 2026-11-11) is uncommitted. The
-  hosted run was triggered by the user's own push; no pushes or workflow
-  triggers were performed by the project's working sessions at any point.
+  committed and pushed through `4fd157d` ("fix: ensure CI test logs are
+  uploaded" on `origin/main`, live-verified 2026-11-11 via `git ls-remote`;
+  parent `7f4a9db`). The hosted-CI artifact-evidence amendment (this update,
+  2026-11-11) is uncommitted. Both hosted runs were triggered by authorized
+  pushes to `main`; no unauthorized pushes or manual workflow dispatches
+  occurred.
 
-## 5. Final Git state (amended 2026-11-11 — hosted-evidence update)
+## 5. Final Git state (amended 2026-11-11 — hosted-CI artifact evidence)
 
-- Branch `main`, HEAD `7f4a9dbbc1b1c5903bd4a15913bc780462eed899`
-  ("windows cl test", parent `d024112`), **pushed**: a live `git ls-remote`
-  on 2026-11-11 confirmed `origin/main` == HEAD and the remote default
-  branch is `main`.
-- The commit carries the entire Phase 6 + 6.5 + documentation working set —
-  **11 files, +578/−78 versus `d024112`** — including the CI workflow, the
-  `.gitignore` `.zcode/` entry (line 6), and this closeout record in its
-  final amended state. The working tree was clean at `7f4a9db` before this
-  update.
-- **This hosted-evidence amendment (2026-11-11) re-opens a small uncommitted
-  documentation diff — exactly three tracked files:** `README.md`,
-  `docs/ARCHITECTURE.md`, `docs/PHASE6-CLOSEOUT.md` (+104/−57). Nothing else
-  changed; the clean starting tree is preserved and no other tracked file
-  was touched.
+- Branch `main`, HEAD `4fd157d864b936b4b0e6f2c37716162c9d2a4b5e` ("fix:
+  ensure CI test logs are uploaded", parent `7f4a9db` "windows cl test"),
+  **pushed**: a live `git ls-remote` on 2026-11-11 confirmed `origin/main`
+  == HEAD; the remote default branch is `main`.
+- Documentation-trail commit history: `7f4a9db` carried the entire Phase 6 +
+  6.5 working set (11 files, +578/−78 versus `d024112`, including the CI
+  workflow, the `.gitignore` `.zcode/` entry at line 6, and this closeout
+  record); `4fd157d` added the CI artifact fix and README status correction
+  (4 files, +136/−62). Both are on `origin/main`.
+- **This hosted-CI artifact evidence amendment (2026-11-11) re-opens a small
+  uncommitted documentation diff — exactly two tracked files:** `README.md`
+  and `docs/PHASE6-CLOSEOUT.md` (+120/−74). The tree was clean beforehand and
+  no other tracked file was touched.
 - Tracked-diffstat provenance: +253/−52 at closeout → +289/−71 after the
-  documentation cleanup → +301/−78 after the ARCHITECTURE.md closure
-  update — **all three states are now committed inside `7f4a9db`**; the
-  +104/−57 above is the only uncommitted remainder.
-- Hosted-CI inspection evidence (artifact metadata, job list, the 403
-  job-log response) was saved under the gitignored `build/` tree
-  (`ci-artifacts-meta.json`, `ci-jobs.json`, `ci-job-130634019902.log`) and
-  is not part of the repository.
+  documentation cleanup → +301/−78 after the ARCHITECTURE.md closure update
+  → +104/−57 after the hosted-evidence amendment — **all committed** (the
+  first three inside `7f4a9db`, the last inside `4fd157d`); the +120/−74
+  above is the only uncommitted remainder.
+- Hosted-CI inspection evidence (run/job/artifact metadata, the 403 job-log
+  and 401 artifact-zip responses, the new run's step results) was saved
+  under the gitignored `build/` tree and is not part of the repository.
 
 ## 6. Inconsistencies noted
 
@@ -228,9 +264,11 @@ closure update (item 3; that update touched only `docs/ARCHITECTURE.md`):
 
 **Claim discipline:** this record states only what the cited evidence shows.
 The §3 local results are real executions performed in the authorized local
-window; the hosted evidence is layered — workflow/job/step success was
-verified via the GitHub API, and no hosted doctest case/assertion counts are
-claimed anywhere because the run's log artifact does not exist; hosted CI is
-not treated as verifying this machine's OS build; security-control state is
-not inferred. The verification logs and CI inspection files live under the
-gitignored `build/` tree and are not part of the repository.
+window; the hosted evidence is layered — workflow/job/step success and the
+artifact's existence, metadata, and commit binding were verified via the
+GitHub API, and no hosted doctest case/assertion counts are claimed anywhere
+because the artifact's contents require authentication and were not
+inspectable in this session; hosted CI is not treated as verifying this
+machine's OS build; security-control state is not inferred. The verification
+logs and CI inspection files live under the gitignored `build/` tree and are
+not part of the repository.

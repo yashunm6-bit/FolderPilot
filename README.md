@@ -21,12 +21,18 @@ Runtime verification of the current Phase 6 state:
 **Local (this machine, authorized Smart App Control–off window): Debug
 144/144 test cases, 1,762/1,762 assertions; Release 144/144 test cases,
 1,762/1,762 assertions — 0 failed and 0 skipped in both.**
-**Hosted (GitHub Actions)**: run `43052752854` ("FolderPilot CI", push to
-`main`, commit `7f4a9db`, `windows-latest` runner with MSYS2 UCRT64) —
-workflow, job, and every step succeeded, including both Test steps, so
-hosted CTest completed without failing tests in both configurations. The
-run's log artifact is absent (never uploaded), so exact hosted test counts
-cannot be quoted. Details: `docs/PHASE6-CLOSEOUT.md` §3–§4.
+**Hosted (GitHub Actions, `yashunm6-bit/FolderPilot`)**: latest run
+`43068578754` ("FolderPilot CI", push to `main`, commit `4fd157d`,
+`windows-latest` runner with MSYS2 UCRT64) — workflow conclusion `success`;
+Debug and Release Configure/Build/Test steps all succeeded, as did the
+test-log verification and artifact-upload steps. It created the
+`folderpilot-test-logs` artifact (ID `13876723467`, 1,272 bytes, not
+expired; artifact metadata SHA matches commit `4fd157d`). Artifact
+existence and metadata are verified; its contents could not be inspected
+anonymously (HTTP 401), so exact hosted doctest counts are not claimed.
+(Earlier run `43052752854`, commit `7f4a9db`, also succeeded but uploaded
+no artifact — wrong CTest log path, since fixed. History:
+`docs/PHASE6-CLOSEOUT.md` §3–§4.)
 Historical, superseded by the figures above — Phase 5 state (commits
 `3940886`, `d024112`): 142/142 test cases, 1,748/1,748 assertions.
 Phase 6 adds Unicode CLI argument handling, Windows hardening, packaging
@@ -103,11 +109,13 @@ paths are:
 1. **Hosted CI** (preferred): `.github/workflows/ci.yml` builds both
    configurations and runs the full suites on a Windows runner, where the
    freshly built binaries execute normally. The workflow runs only when
-   pushed/triggered; it is never triggered from a local machine. First
-   hosted run: 2026-11-11 — run `43052752854` (push of `7f4a9db` to `main`)
-   completed successfully at the workflow/job/step level; see
-   `docs/PHASE6-CLOSEOUT.md` §4 for its evidence and its limits (no log
-   artifact, so no hosted test counts are quoted).
+   pushed/triggered; it is never triggered from a local machine. Hosted
+   runs (2026-11-11): `43052752854` (push of `7f4a9db`) succeeded but its
+   log artifact was never uploaded — wrong CTest log path, since fixed in
+   `4fd157d`; `43068578754` (push of `4fd157d`) succeeded and created the
+   `folderpilot-test-logs` artifact, verified against that commit. Evidence
+   and limits: `docs/PHASE6-CLOSEOUT.md` §3–§4 (artifact contents are not
+   anonymously readable, so hosted test counts are not quoted).
 2. **Machines without SAC enforcement** (e.g. SAC evaluation mode or a
    lab machine with a documented exception): build and run `ctest --preset debug`
    and `ctest --preset release` locally.
