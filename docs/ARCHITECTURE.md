@@ -12,7 +12,11 @@
 > and recursive organization remain out of scope. The Phase 6 state is
 > locally runtime-verified in both configurations — 144/144 test cases,
 > 1,762/1,762 assertions each, zero failed, zero skipped (Debug and
-> Release); hosted CI has not run.
+> Release) — and hosted-verified at the workflow/job/CTest-step level
+> (GitHub Actions run 43052752854, push to main, commit 7f4a9db,
+> windows-latest runner with MSYS2 UCRT64; its exact hosted test counts
+> are not verifiable — the run has no log artifact — see
+> docs/PHASE6-CLOSEOUT.md §3–§4).
 
 ---
 

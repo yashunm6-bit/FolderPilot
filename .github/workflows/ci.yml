@@ -63,12 +63,39 @@ jobs:
       - name: Test (Release)
         run: ctest --preset release --output-on-failure
 
+      # CTest writes its log to <binaryDir>/Testing/Temporary/LastTest.log
+      # (verified locally in both build trees). Assert both files exist
+      # before uploading so a missing log fails loudly with diagnostics
+      # instead of silently producing no artifact (the 2026-11-11 run
+      # uploaded the non-Temporary path and, with warn mode, produced no
+      # artifact at all).
+      - name: Verify test logs exist
+        if: always()
+        run: |
+          missing=0
+          for f in build/debug/Testing/Temporary/LastTest.log \
+                   build/release/Testing/Temporary/LastTest.log; do
+            if [ -f "$f" ]; then
+              echo "FOUND: $f ($(wc -c < "$f") bytes)"
+            else
+              echo "MISSING: $f" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "--- Testing directory contents for diagnosis ---" >&2
+            ls -la build/debug/Testing build/debug/Testing/Temporary \
+                   build/release/Testing build/release/Testing/Temporary 2>&1 || true
+            exit 1
+          fi
+
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: folderpilot-test-logs
           path: |
-            build/debug/Testing/LastTest.log
-            build/release/Testing/LastTest.log
-          if-no-files-found: warn
+            build/debug/Testing/Temporary/LastTest.log
+            build/release/Testing/Temporary/LastTest.log
+          if-no-files-found: error
+          retention-days: 14

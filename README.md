@@ -6,7 +6,7 @@ FolderPilot will sort the files of a user-selected directory into category
 folders (Documents, Images, Videos, Audio, Archives, Code, Other) — showing a
 dry-run plan by default and moving files only on an explicit `--apply`.
 
-## Status: Phase 6 — hardening, tests and documentation (in progress)
+## Status: Phase 6 — hardening, tests and documentation (complete, formally accepted)
 
 Phases 1–3 delivered the build/test foundation, the classification core,
 PathGuard and the handle-anchored scanner; Phase 4 added planning and
@@ -17,14 +17,20 @@ no-overwrite movement. The anchored rename is performed with the native
 fails with ERROR_INVALID_PARAMETER on build 26300 — a build-specific
 observation, not a universal Windows contract; no path-based fallback
 exists by design — see `docs/ARCHITECTURE.md` §11).
-Runtime verification of the current Phase 6 state (local runs; hosted CI
-has not run): **Debug 144/144 test cases, 1,762/1,762 assertions; Release
-144/144 test cases, 1,762/1,762 assertions — 0 failed and 0 skipped in
-both** (detail: `docs/PHASE6-CLOSEOUT.md` §3).
+Runtime verification of the current Phase 6 state:
+**Local (this machine, authorized Smart App Control–off window): Debug
+144/144 test cases, 1,762/1,762 assertions; Release 144/144 test cases,
+1,762/1,762 assertions — 0 failed and 0 skipped in both.**
+**Hosted (GitHub Actions)**: run `43052752854` ("FolderPilot CI", push to
+`main`, commit `7f4a9db`, `windows-latest` runner with MSYS2 UCRT64) —
+workflow, job, and every step succeeded, including both Test steps, so
+hosted CTest completed without failing tests in both configurations. The
+run's log artifact is absent (never uploaded), so exact hosted test counts
+cannot be quoted. Details: `docs/PHASE6-CLOSEOUT.md` §3–§4.
 Historical, superseded by the figures above — Phase 5 state (commits
 `3940886`, `d024112`): 142/142 test cases, 1,748/1,748 assertions.
 Phase 6 adds Unicode CLI argument handling, Windows hardening, packaging
-documentation, and CI-based regression testing (in progress).
+documentation, and CI-based regression testing (complete).
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — approved design, and which
   parts are implemented vs. planned.
@@ -97,7 +103,11 @@ paths are:
 1. **Hosted CI** (preferred): `.github/workflows/ci.yml` builds both
    configurations and runs the full suites on a Windows runner, where the
    freshly built binaries execute normally. The workflow runs only when
-   pushed/triggered; it is never triggered from a local machine.
+   pushed/triggered; it is never triggered from a local machine. First
+   hosted run: 2026-11-11 — run `43052752854` (push of `7f4a9db` to `main`)
+   completed successfully at the workflow/job/step level; see
+   `docs/PHASE6-CLOSEOUT.md` §4 for its evidence and its limits (no log
+   artifact, so no hosted test counts are quoted).
 2. **Machines without SAC enforcement** (e.g. SAC evaluation mode or a
    lab machine with a documented exception): build and run `ctest --preset debug`
    and `ctest --preset release` locally.
