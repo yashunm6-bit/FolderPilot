@@ -1,9 +1,11 @@
 # FolderPilot — Phase 7 Design: Move Journal & Undo (Ratified)
 
-> **STATUS: Contract RATIFIED (G2, G3, G4, G6, G7, G8, G9, G10 as recommended; G1 = BCrypt
-> chosen, evidence pending; G5 deferred to 7.4). Implementation NOT authorized — Phase 7.1
-> (journal module) requires separate approval.** Base: `main` @ `823dfed`. Record date:
-> 2026-11-13. Labels: **[W32-DOC]** documented Windows API behavior · **[SRC]** verified
+> **STATUS: Contract RATIFIED (G2, G3, G4, G6, G7, G8, G9, G10 as recommended; G5 deferred
+> to 7.4). G1: BCrypt chosen and CLOSED — hosted run `43598561201` (commit `dea0dc6`)
+> verified the bcrypt linkage and all four NIST vectors on `windows-latest` (2026-11-14).
+> Implementation NOT authorized — Phase 7.1b (journal records) requires separate approval.**
+> Base: `main` @ `823dfed`; design ratified in commit `cc671a3`; G1 closure recorded
+> 2026-11-14 (record date 2026-11-13). Labels: **[W32-DOC]** documented Windows API behavior · **[SRC]** verified
 > repository source/behavior · **[SETTLED]** user decision · **[REC]** recommendation ·
 > **[GATE]** open decision · **[ASSUMPTION]** unverified.
 
@@ -425,7 +427,7 @@ may be longer than the surviving files show".
 
 | # | Decision | Status | Evidence requirement |
 |---|---|---|---|
-| G1 | SHA-256 provider: **BCrypt chosen** | OPEN — stays open until a green hosted `windows-latest` run with the link probe and known-answer SHA-256 test; **if linking fails, report and stop — no silent in-tree fallback** | 7.1 probe + hosted green run |
+| G1 | SHA-256 provider: **BCrypt** | **CLOSED 2026-11-14** — hosted run `43598561201` (commit `dea0dc6`) green: Build (Debug)/(Release) linked `-lbcrypt`; Test (Debug)/(Release) executed the four NIST FIPS 180-4 vectors (empty, `abc`, 448-bit, 896-bit multi-block) green. Verified: bcrypt linkage (Build steps) and vector execution+passing (Test steps, exit-0 semantics) in both configurations. Not verified: per-vector pass counts (job log is auth-only); local execution (SAC ON). The G1-status comment in `platform/sha256.hpp` is updated at 7.1b. No in-tree fallback was needed | run `43598561201` job evidence (API) + Actions page |
 | G2 | Forward abandoned-init non-blocking | **RATIFIED** | tests T-45…47 |
 | G3 | Ack-flag name `--acknowledge-undo-window`; safety refusals exit 2, operational 3 | **RATIFIED** | tests T-01…07 |
 | G4 | ACL **validation** (not construction) of the journals directory | **RATIFIED** | tests T-29…30 |
@@ -442,7 +444,7 @@ may be longer than the surviving files show".
 
 | Step | Content | Gate |
 |---|---|---|
-| 7.1 | Journal module (deep module, C++20): canonical serializer, SHA-256 via BCrypt **with hosted link probe + known-answer test** (closes G1 or stops), bounds enforcement; pure unit tests | Design/impl report |
+| 7.1 | Journal module (deep module, C++20): canonical serializer, SHA-256 via BCrypt with hosted link probe + known-answer test, bounds enforcement; pure unit tests. **7.1a done: probe landed in `dea0dc6`; G1 closed (run `43598561201`, §16)** — 7.1b needs separate approval | 7.1b report |
 | 7.2 | Forward-executor journal integration (write-ahead) + undo planning + reconciliation | Report |
 | 7.3 | Undo execution + undo report + exit codes | Report |
 | 7.4 | CLI surface (`--undo`, ack flag), reporter, **G5 wording + executor.hpp amendment + docs** | Report |
@@ -519,14 +521,15 @@ and sharing-conflict arithmetic; `FlushFileBuffers` GENERIC_WRITE requirement; k
 handle cleanup at termination; `SetFileTime` mutability; NTFS tunneling; hidden `AppData`
 attribute; filename-component character prohibitions; written-bytes-survive-process-
 death. **[SRC]** scanner identity/`Unsupported` skip; opened-handle authority; platform-
-only Win32 layering; 144/1,762 local and hosted CI evidence. **[ASSUMPTIONS]** MinGW
-`bcrypt` import (G1 — evidence pending); `%LOCALAPPDATA%` ACL defaults; ReFS identity
-behavior; SAC-off window grantable for 7.5.
+only Win32 layering; 144/1,762 local and hosted CI evidence. **[VERIFIED]** MinGW bcrypt
+import: hosted run `43598561201` built and linked `-lbcrypt` on `windows-latest` (G1
+closed, §16). **[ASSUMPTIONS]** `%LOCALAPPDATA%` ACL defaults; ReFS identity behavior;
+SAC-off window grantable for 7.5.
 
 ---
 
 **Claim discipline:** this contract states only what the cited evidence shows or what the
 ratified decisions define. Hosted CI capability is asserted only where runs verified it;
-G1 remains open until its probe goes green; coordinated rollback is disclosed as
+G1 is closed with hosted evidence (run `43598561201`); coordinated rollback is disclosed as
 undetectable rather than hidden; and no guarantee exceeds what the implemented mechanism
 will provide.
