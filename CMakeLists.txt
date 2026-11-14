@@ -74,9 +74,17 @@ target_link_libraries(folderpilot_core PUBLIC
 add_library(folderpilot_platform STATIC
     platform/text.cpp
     platform/native.cpp
+    platform/sha256.cpp
 )
 target_include_directories(folderpilot_platform PUBLIC ${CMAKE_SOURCE_DIR}/platform)
-target_link_libraries(folderpilot_platform PUBLIC folderpilot_build_options)
+# Phase 7.1a (G1 probe): SHA-256 via the Windows CNG provider (BCrypt).
+# PUBLIC so every consumer of the platform library links the bcrypt import
+# library transitively. bcrypt.dll is a system component; the -static option
+# above applies only to the GCC runtime and is unaffected.
+target_link_libraries(folderpilot_platform PUBLIC
+    folderpilot_build_options
+    bcrypt
+)
 
 # ---------------------------------------------------------------------------
 # Application: the FolderPilot CLI.
