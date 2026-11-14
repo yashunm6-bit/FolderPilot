@@ -60,6 +60,8 @@ add_library(folderpilot_core STATIC
     lib/folderpilot/planner.cpp
     lib/folderpilot/reporter.cpp
     lib/folderpilot/executor.cpp
+    lib/folderpilot/journal.cpp
+    lib/folderpilot/journal_classify.cpp
 )
 target_include_directories(folderpilot_core PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(folderpilot_core PUBLIC

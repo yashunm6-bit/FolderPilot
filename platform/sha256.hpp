@@ -5,10 +5,11 @@
 // in sha256.cpp, per the layering rule that Win32 exists only inside
 // platform/. Linked with the bcrypt import library (-lbcrypt).
 //
-// G1 status: this wrapper is the probe. Gate G1 stays OPEN until a hosted
-// windows-latest run proves (a) the bcrypt linkage and (b) the NIST
-// known-answer vectors. On a hosted linkage or vector failure: report and
-// stop - no in-tree fallback without explicit approval (docs/PHASE7-DESIGN.md G1).
+// G1 status: CLOSED (2026-11-14) - hosted run 43598561201 (commit dea0dc6)
+// verified the bcrypt linkage and all four NIST FIPS 180-4 vectors on
+// windows-latest in Debug and Release (docs/PHASE7-DESIGN.md section 16).
+// This wrapper is the production integrity primitive for the Phase 7 move
+// journal (lib/folderpilot/journal.cpp hashes every record through it).
 
 #pragma once
 
