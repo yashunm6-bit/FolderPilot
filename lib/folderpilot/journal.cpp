@@ -1594,7 +1594,11 @@ bool check_transition_and_continuity(LineParser& p, ParseContext& ctx, std::size
         return p.fail(ParseFailureKind::TransitionViolation,
                       "seq does not match the record position", 0);
     }
-    const bool forward = ctx.dir == JournalDir::Forward;
+    // The record's variant family IS its direction: parse_head has already
+    // rejected dir/type mismatches. The context's dir is only learned from
+    // record 0 in the continuity block below, so deriving `forward` from it
+    // here would misjudge every undo file at its first record.
+    const bool forward = rec.index() <= 3;
     switch (ctx.step) {
         case ParseContext::Step::WantStart: {
             if (forward) {
