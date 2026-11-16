@@ -3,7 +3,9 @@
 > **STATUS: Contract RATIFIED (G2, G3, G4, G6, G7, G8, G9, G10 as recommended; G5 deferred
 > to 7.4). G1: BCrypt chosen and CLOSED — hosted run `43598561201` (commit `dea0dc6`)
 > verified the bcrypt linkage and all four NIST vectors on `windows-latest` (2026-11-14).
-> Implementation NOT authorized — Phase 7.1b (journal records) requires separate approval.**
+> Phase 7.1b (journal records) IMPLEMENTED and hosted-verified at `bc520c2` (run
+> `43924678919`: Debug and Release each 200/200 cases, 13,843/13,843 assertions, zero
+> failed/skipped); §6.3/§12/§15 reconciled to the verified implementation (2026-11-16).**
 > Base: `main` @ `823dfed`; design ratified in commit `cc671a3`; G1 closure recorded
 > 2026-11-14 (record date 2026-11-13). Labels: **[W32-DOC]** documented Windows API behavior · **[SRC]** verified
 > repository source/behavior · **[SETTLED]** user decision · **[REC]** recommendation ·
@@ -126,6 +128,8 @@ persisted (R24).
 | **RUN-END complete, unanchored** | Terminal: closed with durability caveat | nothing mutation-capable follows |
 | **Torn terminal RUN-END** | Terminal rules: unterminated-but-complete, disclosed | bookkeeping only |
 | More than one uncovered record, or any impossible transition | **Protocol violation ⇒ BLOCKED** | the protocol stops at the first failure; ≤1 uncovered record is reachable |
+| Zero complete records — clean empty, or torn head uniquely identifying RUN-START | **Abandoned-forward-initialization** | no INTENT possible; sequence permanently consumed [G2] |
+| Zero complete records — torn head untyped, or typed INTENT/another impossible first record | **BLOCKED** | a torn tail that cannot reveal its type, or identifying an impossible first record, cannot exclude a previously authorized rename (R20) |
 
 **Torn/failed anchor tail:** harmless **only** when `uncovered(J)` is empty; if
 `uncovered(J)` is non-empty, a torn or failed anchor tail **may have covered an INTENT
@@ -154,7 +158,10 @@ over canonical record bytes excluding `integrity`; `prev` = SHA-256 of the previ
 record's canonical form (genesis = SHA-256 over root-key ‖ `root_run_seq` ‖ `run`) —
 **interior integrity/ordering only; neither the hash chain nor `seq` detects suffix
 truncation.** All size caps apply to the **canonical serialized form** (JSON escaping
-included, terminating LF counted).
+included, terminating LF counted) — including an unterminated final record, whose
+canonical form counts the LF its writer would have written. `prev` is carried by every
+journal and segment record (genesis = seed) and never by anchor records; undo records
+carry **no** `move_id` (the reversed move is identified by `undo_of_move`).
 
 **Common (all records):** `v` ≤3 · `run` ≤34 · `dir` ≤9 · `type` ≤13 · `seq` ≤8
 (per-file, 0-based, gap-free) · `root_run_seq` ≤20 · `prev` ≤66 · `integrity` ≤66.
@@ -218,12 +225,15 @@ never declared inert after reopening (§10, segment rows).
   uncovered INTENT, any torn RESULT/UNDO-RESULT beyond coverage, torn-within-coverage,
   truncation, chain break, or correlation anomaly ⇒ **blocked** (permanence; only a
   future designed `--recover` [G7] changes it).
-- **Declared-inert:** RUN-START-only (covered or not) or RUN-START + torn-INTENT tail ⇒
-  zero INTENTs ⇒ provably no mutation (bounded by R25); non-blocking; dormant ack
-  preserved; disclosed.
-- **Abandoned-forward-initialization:** zero complete records ⇒ non-blocking, sequence
+- **Declared-inert:** RUN-START-only, covered or not ⇒ zero INTENT records ⇒ provably no
+  mutation (bounded by R25); non-blocking; dormant ack preserved; disclosed. (The
+  earlier draft's "RUN-START + torn-INTENT tail" extension is **withdrawn**:
+  torn-tail classification is expected-record-aware per §4.1/R20/T-60.)
+- **Abandoned-forward-initialization:** zero complete records — a clean empty journal,
+  or a torn head that uniquely identifies RUN-START ⇒ non-blocking, sequence
   permanently consumed, byte-identical preservation, disclosed, excluded from
-  newest-operation-bearing selection [G2].
+  newest-operation-bearing selection [G2]; an untyped torn head, or one identifying
+  INTENT or another impossible first-record type, ⇒ **blocked** (fail-closed, R20).
 
 **6.4 Attempt-level states:** segment zero-complete-records/torn-UNDO-START ⇒
 **abandoned-attempt-initialization** — `undo_attempt_seq` permanently consumed, segment
@@ -335,24 +345,50 @@ free ⇒ the §4.1/§10 classifications; read-only evidence inspection for block
 `1 + N + N = 2N + 1` (3,001; RUN-END not anchored) · attempt = `1 + c + c + 1 = 2c + 2`
 (3,002).
 
-**Per-record ceilings (derived from §5 field bounds; skeleton ≤320 B = keys + quotes +
-punctuation; hashes ≤82 B incl. key; identities ≤73 B; counters ≤20 digits):** RUN-START
-≈ 4,837 B (≤4,900) · INTENT ≈ 2,167 B (≤2,200) · RESULT ≈ 2,702 B (≤2,750) · RUN-END ≈
-359 B (≤400) · UNDO-START ≈ 668 B (≤700) · UNDO-INTENT ≈ 2,245 B (≤2,300) · UNDO-RESULT
-≈ 2,782 B (≤2,850) · UNDO-END ≈ 359 B (≤400) · anchor ≈ 414 B (≤450). All ≤ the 8 KiB
-per-record cap ✓.
+**Per-record maxima (canonical serialization at `bc520c2`, hosted-verified; stored
+record bytes including the terminating LF; JSON bytes excluding LF are one less).
+Every journal/segment record carries `prev` (74 B: comma + `"prev":"` + 64 hex + `"`);
+anchors carry none; undo records carry no `move_id`:** RUN-START 4,831 · INTENT 2,163 ·
+RESULT 2,718 · RUN-END 411 · UNDO-START 529 · UNDO-INTENT 2,326 · UNDO-RESULT 2,881 ·
+UNDO-END 537 · anchor 401. These are schema maxima (maximal run ≤34, 20-digit
+`root_run_seq`/`undo_attempt_seq`/timestamps, 4,096-byte `root_path`, 765-byte names,
+512-byte `detail`); hosted CI measured the T-15 fixtures at 4,831/2,142/2,697/369/508/
+2,305/2,860/476/401 (fixture widths sit below the schema maxima). The section's earlier
+derived estimates predate the implemented canonical form and are superseded. The
+binding runtime cap remains the 8 KiB per-record limit (§5) — these maxima are
+measurements, not new runtime restrictions.
 
-**Per-file upper bounds (exact ceilings):**
+**Per-file upper bounds — two bases, both ≤ 16 MiB.**
 
-| File | Formula | N = c = 1,500 | ≤ 16 MiB? |
-|---|---|---|---|
-| Forward journal | `4,837 + N×(2,167+2,704) + 359` = **`4,871N + 5,204 B`** | 7,311,857 B ≈ **6.97 MiB** | ✓ |
-| Anchor | `(2N+1)×450` = **`900N + 450 B`** | 1,350,450 B ≈ **1.29 MiB** | ✓ |
-| Attempt segment (unanchored) | `668 + c×(2,245+2,782) + 375` = **`5,027c + 1,043 B`** | 7,540,543 B ≈ **7.19 MiB** | ✓ |
-| **One full cycle** | sum | ≈ **15.45 MiB** | ⇒ 128 MiB per-root aggregate admits **8 complete cycles** (8 × 15,453,384 = 123,627,072 ≤ 134,217,728) |
+*Basis A — per-record maximum composition* (the doc's original method: every record
+simultaneously at its maximum, including 20-digit `root_run_seq`/`undo_attempt_seq` and
+8-digit seq/move/count widths):
+
+| File | Formula | N = c = 1,500 |
+|---|---|---|
+| Forward journal | `4,831 + N×(2,163+2,718) + 411` = **`4,881N + 5,242 B`** | 7,326,742 B ≈ 6.99 MiB |
+| Anchor | `(2N+1)×401` = **`802N + 401 B`** | 1,203,401 B ≈ 1.15 MiB |
+| Attempt segment (unanchored) | `529 + c×(2,326+2,881) + 537` = **`5,207c + 1,066 B`** | 7,811,566 B ≈ 7.45 MiB |
+| **One full cycle** | sum = **16,341,709 B** | ⇒ 8 cycles = 130,733,672 ≤ 134,217,728; headroom 3,484,056 B |
+
+*Basis B — legal reserve-helper sequences* (what `forward_reserve_bytes` /
+`segment_reserve_bytes` / `anchor_reserve_bytes` actually build: seq = record position
+≤ 3,001, move/attempt/undo ids ≤ 1,499 and summary counts ≤ 1,500 ⇒ ≤4 digits;
+anchor_seq/covered_seq = 2N ⇒ 4 digits):
+
+| File | Formula | N = c = 1,500 |
+|---|---|---|
+| Forward journal | `4,831 + N×(2,155+2,710) + 387` = **`4,865N + 5,218 B`** | 7,302,718 B |
+| Anchor | `(2N+1)×393` = **`786N + 393 B`** | 1,179,393 B |
+| Attempt segment (unanchored) | `529 + c×(2,314+2,869) + 513` = **`5,183c + 1,042 B`** | 7,775,542 B |
+| **One full cycle** | sum = **16,257,653 B** | ⇒ 8 cycles = 130,061,224 ≤ 134,217,728; headroom 4,156,504 B |
+
+Basis A is the upper bound over the per-record ceilings; Basis B is the exact file
+maximum the runtime admission arithmetic (the reserve helpers) builds under legal
+sequence widths. Both preserve the ratified 8-cycle invariant.
 
 **Three separated quantities:** theoretical per-file maximum (forward bound ⇒
-**N ≈ 3,444**: (16,777,216 − 4,837)/4,871) · operational bound (**1,500 [SETTLED]**) ·
+**N ≈ 3,436**: (16,777,216 − 5,242)/4,881) · operational bound (**1,500 [SETTLED]**) ·
 aggregate admission (exact byte recompute under the root lock at every operation start;
 repeated authorized attempts each add one segment file and are admitted only when the
 recomputed aggregate, including the new segment's exact worst case, fits — refusal
@@ -401,7 +437,9 @@ ambiguous-segment chains stay forward-blocked (reconciliation excepted, §9.3) �
 no automated unblock; `--recover` deferred [G7] · **R8** no success inference from
 ambiguity; no automatic-recovery promise · **R9** inspection read-only · **R10** forward
 abandoned-init non-blocking [G2] · **R11** `lock_id`/`anchor_id`/`journal_id`/
-`fwd_journal_digest` continuity ⇒ refuse · **R12** segments/anchors are permanent
+`fwd_journal_digest` continuity ⇒ refuse (identity binding is validated before
+coverage arithmetic W7/R15 — the implemented and regression-tested order; both
+refusals block) · **R12** segments/anchors are permanent
 evidence; an ambiguous segment blocks its chain for forward · **R13** attempts admitted
 pre-mutation on capacity · **R14** abandoned-init excluded from selection, sequences
 consumed · **R15** journal shorter than anchor coverage ⇒ blocked, range named ·
@@ -444,7 +482,7 @@ may be longer than the surviving files show".
 
 | Step | Content | Gate |
 |---|---|---|
-| 7.1 | Journal module (deep module, C++20): canonical serializer, SHA-256 via BCrypt with hosted link probe + known-answer test, bounds enforcement; pure unit tests. **7.1a done: probe landed in `dea0dc6`; G1 closed (run `43598561201`, §16)** — 7.1b needs separate approval | 7.1b report |
+| 7.1 | Journal module (deep module, C++20): canonical serializer, SHA-256 via BCrypt with hosted link probe + known-answer test, bounds enforcement; pure unit tests. **7.1a done: probe landed in `dea0dc6`; G1 closed (run `43598561201`, §16). 7.1b done: journal core landed (`b52179c` + remediation through `bc520c2`), hosted CI green (run `43924678919`: Debug and Release 200/200 cases, 13,843/13,843 assertions)** | 7.1b report |
 | 7.2 | Forward-executor journal integration (write-ahead) + undo planning + reconciliation | Report |
 | 7.3 | Undo execution + undo report + exit codes | Report |
 | 7.4 | CLI surface (`--undo`, ack flag), reporter, **G5 wording + executor.hpp amendment + docs** | Report |
@@ -480,7 +518,7 @@ outside the organized tree; plus R25 disclosure), `README.md` (undo usage).
 | T-37 | Root changed ⇒ abort before mutation, exit 2 | Integration | — |
 | T-38…40 | States A/B/C classification via `planned_move_count` + anchored-intent analysis | Integration | §6.3 |
 | T-41…44 | Ack: durable+anchored before mutation; dormancy (RUN-START-only ⇒ older window preserved); activation at first anchored INTENT; **first-INTENT anchor loss ⇒ chain blocked with "supersession status unknown"** | Integration | §8, R17 |
-| T-45…46 | Forward abandoned-init (zero records / torn head): sequence consumed; byte-identical; non-blocking; disclosed | Integration | §6.3, G2 |
+| T-45…46 | Forward abandoned-init (zero records; torn head uniquely identifying RUN-START — untyped or differently-typed torn heads block): sequence consumed; byte-identical; non-blocking; disclosed | Integration | §6.3, G2 |
 | T-47 | Declared-inert preserved older undo window (forward allowed without flag) | Integration | §6.3/§9.5 |
 | T-48 | Unresolved/blocked chain ⇒ forward refused, flag-immune, exit 2 | Integration | R6 |
 | T-49 | Zero-candidate window ⇒ forward allowed with disclosure; no segment for empty undo | Integration | §9.1/§12 |
