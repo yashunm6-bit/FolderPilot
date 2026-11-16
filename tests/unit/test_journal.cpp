@@ -708,14 +708,21 @@ TEST_CASE("T-13: run and per-segment continuity are enforced (with a positive co
     REQUIRE_FALSE(p3.valid);
     CHECK(p3.failure.kind == ParseFailureKind::ContinuityMismatch);
 
-    // fwd_journal_digest discontinuity within a segment.
+    // fwd_journal_digest discontinuity within a segment: the digest is
+    // constant per segment, so the mismatch must be observed on a record the
+    // machine has already reached - after the open UNDO-INTENT (a bare
+    // UNDO-RESULT at index 1 fails the expected-record machine first).
+    const JournalSerializeResult seg_intent =
+        serialize_journal_record(JournalRecord{make_undo_intent(1, 0)}, prev_of(seg0));
+    REQUIRE(seg_intent.ok);
     JournalUndoResult result = make_undo_result(2, 0);
     result.fwd_journal_digest = hex64('9');
     const JournalSerializeResult seg2 =
-        serialize_journal_record(JournalRecord{result}, prev_of(seg0));
+        serialize_journal_record(JournalRecord{result}, prev_of(seg_intent.canonical));
     REQUIRE(seg2.ok);
     const ParsedJournalFile p4 =
-        parse_journal_file(to_bytes(seg0 + seg2.canonical), kRootKey);
+        parse_journal_file(to_bytes(seg0 + seg_intent.canonical + seg2.canonical),
+                           kRootKey);
     REQUIRE_FALSE(p4.valid);
     CHECK(p4.failure.kind == ParseFailureKind::ContinuityMismatch);
 }
@@ -969,6 +976,8 @@ TEST_CASE("T-10: missing, double, leading and trailing commas are rejected") {
     REQUIRE(patch_from(trailing, intent_line, "\"}\n", ",\"}\n"));
     const ParsedJournalFile p4 = parse_journal_file(to_bytes(trailing), kRootKey);
     CHECK_FALSE(p4.valid);
+    CAPTURE(p4.failure.detail);
+    CAPTURE(p4.failure.offset);
     CHECK(p4.failure.kind == ParseFailureKind::NonCanonicalEncoding);
 }
 

@@ -672,6 +672,8 @@ TEST_CASE("T-63: torn terminal RUN-END with all moves final is terminal and disc
                      JournalRecord{make_result(2, 0)},
                      JournalRecord{make_run_end(3, 1)}}, 3);
     const std::string torn = cut_before(chain.journal, "\"type\":\"RUN-END\"", 14);
+    CAPTURE(torn.size());
+    CAPTURE(torn.substr(torn.size() - 40));
     const ParsedJournalFile p = parse_journal_ok(torn);
     REQUIRE(p.tail_type_hint.has_value());
     CHECK(*p.tail_type_hint == JournalRecordType::RunEnd);
