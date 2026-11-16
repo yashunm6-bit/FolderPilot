@@ -684,16 +684,34 @@ TEST_CASE("T-63: torn terminal RUN-END with all moves final is terminal and disc
     CHECK(c.completed_moves == 1);
 
     // A torn RUN-END while planned RESULTs are missing is a protocol
-    // violation, not a terminal state.
-    const BuiltChain inconsistent =
-        build_chain({JournalRecord{make_run_start(2, false)},
-                     JournalRecord{make_intent(1, 0)},
-                     JournalRecord{make_result(2, 0)},
-                     JournalRecord{make_run_end(3, 2)}}, 3);
-    const std::string torn2 = cut_before(inconsistent.journal, "\"type\":\"RUN-END\"", 14);
-    const ParsedJournalFile p2 = parse_journal_ok(torn2);
-    const ParsedAnchorFile a2 = parse_anchor_ok(inconsistent.anchor);
-    const ForwardChainClassification c2 = classify(p2, &a2);
+    // violation, not a terminal state. The inconsistent full chain cannot be
+    // built through build_chain (its validation parse rejects the
+    // expected-record violation: planned 2 with one RESULT leaves the
+    // machine at WantIntent), so the records are serialized directly and the
+    // anchor is built from the torn image's three complete records.
+    const JournalSerializeResult inconsistent =
+        serialize_journal_chain({JournalRecord{make_run_start(2, false)},
+                                 JournalRecord{make_intent(1, 0)},
+                                 JournalRecord{make_result(2, 0)},
+                                 JournalRecord{make_run_end(3, 2)}}, kRootKey);
+    REQUIRE(inconsistent.ok);
+    const std::string torn2 = cut_before(inconsistent.canonical, "\"type\":\"RUN-END\"", 14);
+    const ParsedJournalFile p2 = parse_journal_file(to_bytes(torn2), kRootKey);
+    REQUIRE_MESSAGE(p2.valid, "journal parse failed: ", p2.failure.detail);
+    REQUIRE(p2.records.size() == 3);
+    std::string anchor2;
+    for (std::size_t i = 0; i < p2.records.size(); ++i) {
+        AnchorRecord a;
+        a.root_run_seq = kRootRunSeq;
+        a.journal_id = kIdentity;
+        a.anchor_seq = i;
+        a.covered_seq = i;
+        a.byte_len = p2.record_end[i];
+        a.last_record_hash = journal_hex(p2.record_digests[i]);
+        anchor2 += ser_anchor(a);
+    }
+    const ParsedAnchorFile a2 = parse_anchor_ok(anchor2);
+    const ForwardChainClassification c2 = classify_forward_chain(p2, &a2, kIds);
     CHECK(c2.state == ForwardChainState::Blocked);
     CHECK(c2.reason == ForwardBlockReason::ProtocolViolation);
 }

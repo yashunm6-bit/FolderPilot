@@ -971,13 +971,13 @@ TEST_CASE("T-10: missing, double, leading and trailing commas are rejected") {
     CHECK_FALSE(p3.valid);
     CHECK(p3.failure.kind == ParseFailureKind::NonCanonicalEncoding);
 
-    // Trailing comma before the closing brace of the INTENT record.
+    // Trailing comma before the closing brace of the INTENT record. The
+    // needle must not consume the integrity value's closing quote (that
+    // would splice the comma INTO the 64-hex value).
     std::string trailing = image;
-    REQUIRE(patch_from(trailing, intent_line, "\"}\n", ",\"}\n"));
+    REQUIRE(patch_from(trailing, intent_line, "}\n", ",}\n"));
     const ParsedJournalFile p4 = parse_journal_file(to_bytes(trailing), kRootKey);
     CHECK_FALSE(p4.valid);
-    CAPTURE(p4.failure.detail);
-    CAPTURE(p4.failure.offset);
     CHECK(p4.failure.kind == ParseFailureKind::NonCanonicalEncoding);
 }
 
