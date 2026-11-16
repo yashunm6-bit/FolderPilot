@@ -689,11 +689,13 @@ TEST_CASE("T-63: torn terminal RUN-END with all moves final is terminal and disc
     // expected-record violation: planned 2 with one RESULT leaves the
     // machine at WantIntent), so the records are serialized directly and the
     // anchor is built from the torn image's three complete records.
+    const std::vector<JournalRecord> inconsistent_records = {
+        JournalRecord{make_run_start(2, false)},
+        JournalRecord{make_intent(1, 0)},
+        JournalRecord{make_result(2, 0)},
+        JournalRecord{make_run_end(3, 2)}};
     const JournalSerializeResult inconsistent =
-        serialize_journal_chain({JournalRecord{make_run_start(2, false)},
-                                 JournalRecord{make_intent(1, 0)},
-                                 JournalRecord{make_result(2, 0)},
-                                 JournalRecord{make_run_end(3, 2)}}, kRootKey);
+        serialize_journal_chain(inconsistent_records, kRootKey);
     REQUIRE(inconsistent.ok);
     const std::string torn2 = cut_before(inconsistent.canonical, "\"type\":\"RUN-END\"", 14);
     const ParsedJournalFile p2 = parse_journal_file(to_bytes(torn2), kRootKey);
