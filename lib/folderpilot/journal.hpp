@@ -449,7 +449,9 @@ enum class ForwardChainState {
     PartialUnambiguous,      // state B: k of N finals, no INTENT beyond the prefix
     Blocked,                 // state C / protocol violation / anchor / W7 refusals
     DeclaredInert,           // RUN-START only, zero INTENT bytes (docs section 6.3)
-    AbandonedForwardInit,    // zero complete records (docs sections 4/6.3, G2)
+    AbandonedForwardInit,    // zero complete records; a torn head qualifies only
+                             // when it uniquely identifies RUN-START (docs
+                             // sections 4/6.3, G2 + the pinned torn-tail rule)
 };
 
 enum class ForwardBlockReason {

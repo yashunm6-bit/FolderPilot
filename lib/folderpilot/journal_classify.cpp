@@ -120,6 +120,75 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
         out.ack_window = head_ack ? AckWindowStatus::Unknown : AckWindowStatus::None;
         return out;
     }
+    const bool anchor_present = anchor != nullptr && !anchor->records.empty();
+
+    // 2. Zero complete records (docs sections 4/6.3, G2): decided before the
+    // RUN-START guard, because this journal shape has none. The ratified
+    // fail-closed rule blocks a torn head that cannot reveal its record
+    // type; only a head that uniquely identifies RUN-START (or a clean
+    // empty file) is an abandoned forward initialization.
+    if (j.records.empty()) {
+        out.anchor_absent = !anchor_present;
+        // An anchor file that exists but holds no complete record (torn
+        // tail only) is disclosed as debris: nothing was ever anchored, so
+        // the torn tail cannot hide coverage (T-70b's uncovered(J)-empty
+        // arm). A non-empty anchor reaches the blocked coverage path below.
+        if (!anchor_present && anchor != nullptr &&
+            anchor->tail == JournalTailKind::Torn) {
+            out.torn_anchor_debris = true;
+        }
+        if (anchor_present) {
+            // R11 anchor-side binding first, then W7 (R11 precedes W7;
+            // pinned by test). Every valid anchor record covers at least one
+            // byte (the parser rejects a zero-byte genesis claim), so an
+            // empty journal is always below coverage here.
+            if (anchor->records[0].journal_id != ids.expected_journal_id) {
+                out.state = ForwardChainState::Blocked;
+                out.reason = ForwardBlockReason::IdentityMismatch;
+                out.detail = "anchor names journal \"" + anchor->records[0].journal_id +
+                             "\" but the storage-verified identity is \"" +
+                             ids.expected_journal_id + "\"";
+                return out;
+            }
+            const unsigned long long proven = anchor->records.back().byte_len;
+            out.state = ForwardChainState::Blocked;
+            out.reason = ForwardBlockReason::JournalBelowCoverage;
+            out.detail = "journal has " + std::to_string(j.total_bytes) +
+                         " bytes; the anchor proves " + std::to_string(proven) +
+                         " bytes; lost range [" + std::to_string(j.total_bytes) + ", " +
+                         std::to_string(proven) + ")";
+            return out;
+        }
+        if (j.tail == JournalTailKind::Torn) {
+            if (!j.tail_type_hint.has_value()) {
+                out.state = ForwardChainState::Blocked;
+                out.reason = ForwardBlockReason::UncoveredTailUntyped;
+                out.detail = "torn tail is too short to reveal its record type";
+                return out;
+            }
+            if (*j.tail_type_hint == JournalRecordType::RunStart) {
+                out.state = ForwardChainState::AbandonedForwardInit;
+                out.detail = "initialization abandoned with a torn head record";
+                return out;
+            }
+            if (*j.tail_type_hint == JournalRecordType::Intent) {
+                out.state = ForwardChainState::Blocked;
+                out.reason = ForwardBlockReason::AnchorMissingWithIntents;
+                out.detail = "INTENT evidence exists without any anchor record; a "
+                             "previously authorized rename cannot be excluded";
+                return out;
+            }
+            out.state = ForwardChainState::Blocked;
+            out.reason = ForwardBlockReason::ProtocolViolation;
+            out.detail = "torn tail of an impossible shape without any anchor record";
+            return out;
+        }
+        out.state = ForwardChainState::AbandonedForwardInit;
+        out.detail = "initialization abandoned with zero records";
+        return out;
+    }
+
+    // 3. RUN-START head guard.
     if (rs == nullptr) {
         out.state = ForwardChainState::Blocked;
         out.reason = ForwardBlockReason::ParseInvalid;
@@ -127,9 +196,7 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
         return out;
     }
 
-    const bool anchor_present = anchor != nullptr && !anchor->records.empty();
-
-    // 2. Cross-binding (R11): the anchor names the journal, RUN-START names
+    // 4. Cross-binding (R11): the anchor names the journal, RUN-START names
     // the anchor. Mismatch on either side is a structured refusal.
     if (anchor_present) {
         if (anchor->records[0].journal_id != ids.expected_journal_id) {
@@ -152,7 +219,7 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
         }
     }
 
-    // 3. Coverage claims versus the journal (W7, alignment, hash binding).
+    // 5. Coverage claims versus the journal (W7, alignment, hash binding).
     const AnchorRecord* cov = nullptr;
     if (anchor_present) {
         cov = &anchor->records.back();
@@ -201,20 +268,7 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
         }
     }
 
-    // 4. Zero complete records: abandoned forward initialization (G2),
-    // regardless of the anchor state or a torn head.
-    if (j.records.empty()) {
-        out.state = ForwardChainState::AbandonedForwardInit;
-        out.anchor_absent = !anchor_present;
-        if (j.tail == JournalTailKind::Torn) {
-            out.detail = "initialization abandoned with a torn head record";
-        } else {
-            out.detail = "initialization abandoned with zero records";
-        }
-        return out;
-    }
-
-    // 5. No coverage (anchor missing or empty).
+    // 6. No coverage (anchor missing or empty).
     if (!anchor_present) {
         out.anchor_absent = true;
         const bool torn_tail = j.tail == JournalTailKind::Torn;
@@ -243,7 +297,7 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
         return out;
     }
 
-    // 6. Coverage exists: uncover the journal tail beyond the proven prefix.
+    // 7. Coverage exists: uncover the journal tail beyond the proven prefix.
     const std::size_t covered_count = cov->covered_seq + 1;
     const std::size_t uncovered_complete = j.records.size() - covered_count;
     const bool torn_tail = j.tail == JournalTailKind::Torn;
@@ -439,11 +493,30 @@ SegmentClassification classify_segment(const ParsedJournalFile& seg) {
         return out;
     }
     if (seg.records.empty()) {
-        // Abandoned attempt initialization: torn/zero head (docs section 6.4).
+        // Zero complete records (docs section 6.4): the same ratified
+        // fail-closed rule as the forward classifier - a torn head that
+        // cannot reveal its record type is blocked, never an abandoned
+        // attempt initialization; only a head uniquely identifying
+        // UNDO-START (or a clean empty file) is.
+        if (seg.tail == JournalTailKind::Torn) {
+            if (!seg.tail_type_hint.has_value()) {
+                out.state = SegmentState::Blocked;
+                out.reason = SegmentBlockReason::UncoveredTailUntyped;
+                out.detail = "torn tail is too short to reveal its record type";
+                return out;
+            }
+            if (*seg.tail_type_hint == JournalRecordType::UndoStart) {
+                out.state = SegmentState::AbandonedAttemptInit;
+                out.detail = "attempt initialization abandoned with a torn head record";
+                return out;
+            }
+            out.state = SegmentState::Blocked;
+            out.reason = SegmentBlockReason::TransitionViolation;
+            out.detail = "torn tail of an impossible shape in an attempt segment";
+            return out;
+        }
         out.state = SegmentState::AbandonedAttemptInit;
-        out.detail = seg.tail == JournalTailKind::Torn
-                         ? "attempt initialization abandoned with a torn head record"
-                         : "attempt initialization abandoned with zero records";
+        out.detail = "attempt initialization abandoned with zero records";
         return out;
     }
     const JournalUndoStart* us = head_undo_start(seg);
@@ -696,8 +769,9 @@ CapacityEstimate segment_reserve_bytes(const JournalUndoStart& start,
         intent.source_name = repeat_char('a', journal_name_max_bytes);
         intent.dest_name = repeat_char('a', journal_name_max_bytes);
         intent.dest_cat = Category::Documents;
-        records.emplace_back(std::move(intent));
-
+        // Build the result from the fully populated intent BEFORE the intent
+        // is moved into the record vector: reading moved-from strings would
+        // understate (or break) the worst-case reserve.
         JournalUndoResult result;
         result.run = intent.run;
         result.seq = 2 * k + 2;
@@ -716,6 +790,7 @@ CapacityEstimate segment_reserve_bytes(const JournalUndoStart& start,
         result.dest_cat = intent.dest_cat;
         result.outcome = JournalOutcome::DestinationChanged;  // longest ratified name
         result.detail = repeat_char('a', journal_detail_max_bytes);
+        records.emplace_back(std::move(intent));
         records.emplace_back(std::move(result));
     }
     JournalUndoEnd end_record;

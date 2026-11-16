@@ -13,6 +13,7 @@
 
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -186,6 +187,52 @@ std::string ser_anchor(const AnchorRecord& rec) {
     return r.canonical;
 }
 
+// Serializes one record as record 0 of its file: `prev` is the ratified
+// genesis seed (the parser verifies record 0 against it).
+std::string ser_first(const JournalRecord& rec) {
+    unsigned long long root_run_seq = 0;
+    std::string run;
+    std::visit([&](const auto& r) {
+        root_run_seq = r.root_run_seq;
+        run = r.run;
+    }, rec);
+    const JournalHashResult genesis = journal_genesis_prev(kRootKey, root_run_seq, run);
+    REQUIRE(genesis.ok);
+    const JournalSerializeResult r = serialize_journal_record(rec, genesis.hex);
+    REQUIRE_MESSAGE(r.ok, "serialize failed: ", r.error);
+    return r.canonical;
+}
+
+// Serializes a whole record sequence: the genesis seed and the prev chain
+// are computed by the serializer, exactly as a writer would.
+std::string chain_bytes(const std::vector<JournalRecord>& records) {
+    const JournalSerializeResult r = serialize_journal_chain(records, kRootKey);
+    REQUIRE_MESSAGE(r.ok, "chain serialize failed: ", r.error);
+    return r.canonical;
+}
+
+// SHA-256 of a canonical line without its LF - the prev of the next record.
+std::string prev_of(const std::string& line) {
+    std::string_view view(line);
+    if (!view.empty() && view.back() == '\n') {
+        view.remove_suffix(1);
+    }
+    const platform::Sha256Result h = platform::sha256(to_bytes(std::string(view)));
+    REQUIRE(h.ok);
+    return journal_hex(h.digest);
+}
+
+// Byte offset of line `index` (0-based) within a serialized image.
+std::size_t line_offset(const std::string& image, std::size_t index) {
+    std::size_t pos = 0;
+    for (std::size_t i = 0; i < index; ++i) {
+        const std::size_t nl = image.find('\n', pos);
+        REQUIRE(nl != std::string::npos);
+        pos = nl + 1;
+    }
+    return pos;
+}
+
 // A parsed journal plus a consistent anchor image covering its first
 // `anchor_count` records (one anchor record per journal record).
 struct BuiltChain {
@@ -259,6 +306,139 @@ TEST_CASE("T-45: forward abandoned initialization is non-blocking (G2)") {
     const ForwardChainClassification c2 = classify(p, nullptr);
     CHECK(c2.state == ForwardChainState::AbandonedForwardInit);
     CHECK(c2.anchor_absent);
+}
+
+TEST_CASE("T-45: torn-head typing separates abandoned-init from blocked") {
+    // Untyped torn head (cut inside the run string): blocked, never an
+    // abandoned initialization (ratified fail-closed rule).
+    const BuiltChain bare = build_chain({JournalRecord{make_run_start(2, false)}}, 1);
+    const std::string short_head = bare.journal.substr(0, 14);  // `{"v":1,"run":"`
+    const ParsedJournalFile untyped = parse_journal_ok(short_head);
+    CHECK(untyped.records.empty());
+    CHECK(untyped.tail == JournalTailKind::Torn);
+    CHECK_FALSE(untyped.tail_type_hint.has_value());
+    const ForwardChainClassification c1 = classify(untyped, nullptr);
+    CHECK(c1.state == ForwardChainState::Blocked);
+    CHECK(c1.reason == ForwardBlockReason::UncoveredTailUntyped);
+
+    // Typed INTENT head: INTENT evidence exists without any anchor record.
+    const std::string intent_head =
+        cut_before(ser_first(JournalRecord{make_intent(1, 0)}), "\"type\":\"INTENT\"", 14);
+    const ParsedJournalFile typed = parse_journal_ok(intent_head);
+    REQUIRE(typed.tail_type_hint.has_value());
+    CHECK(*typed.tail_type_hint == JournalRecordType::Intent);
+    const ForwardChainClassification c2 = classify(typed, nullptr);
+    CHECK(c2.state == ForwardChainState::Blocked);
+    CHECK(c2.reason == ForwardBlockReason::AnchorMissingWithIntents);
+
+    // An impossible first-record type (RESULT): protocol violation.
+    const std::string result_head =
+        cut_before(ser_first(JournalRecord{make_result(0, 0)}), "\"type\":\"RESULT\"", 14);
+    const ParsedJournalFile impossible = parse_journal_ok(result_head);
+    REQUIRE(impossible.tail_type_hint.has_value());
+    CHECK(*impossible.tail_type_hint == JournalRecordType::Result);
+    const ForwardChainClassification c3 = classify(impossible, nullptr);
+    CHECK(c3.state == ForwardChainState::Blocked);
+    CHECK(c3.reason == ForwardBlockReason::ProtocolViolation);
+
+    // An undo-typed head in a forward journal is an impossible shape too.
+    const std::string undo_head =
+        cut_before(ser_first(JournalRecord{make_undo_start(1)}), "\"type\":\"UNDO-START\"", 14);
+    const ParsedJournalFile undo_typed = parse_journal_ok(undo_head);
+    REQUIRE(undo_typed.tail_type_hint.has_value());
+    CHECK(*undo_typed.tail_type_hint == JournalRecordType::UndoStart);
+    const ForwardChainClassification c3b = classify(undo_typed, nullptr);
+    CHECK(c3b.state == ForwardChainState::Blocked);
+    CHECK(c3b.reason == ForwardBlockReason::ProtocolViolation);
+
+    // Empty journal + existing-but-empty anchor file: classifies identically
+    // to a missing anchor, with the same anchor-absent disclosure.
+    ParsedJournalFile empty = parse_journal_file({}, kRootKey);
+    const ParsedAnchorFile empty_anchor = parse_anchor_file({});
+    const ForwardChainClassification c4 = classify(empty, &empty_anchor);
+    CHECK(c4.state == ForwardChainState::AbandonedForwardInit);
+    CHECK(c4.anchor_absent);
+
+    // An anchor file with only a torn tail (zero complete records) adds the
+    // debris disclosure; the state is unchanged.
+    AnchorRecord debris_head;
+    debris_head.root_run_seq = kRootRunSeq;
+    debris_head.journal_id = kIdentity;
+    debris_head.anchor_seq = 0;
+    debris_head.covered_seq = 0;
+    debris_head.byte_len = 42;
+    debris_head.last_record_hash = hex64('b');
+    std::string torn_anchor_image = ser_anchor(debris_head);
+    torn_anchor_image = torn_anchor_image.substr(0, torn_anchor_image.size() - 10);
+    const ParsedAnchorFile torn_empty_anchor = parse_anchor_ok(torn_anchor_image);
+    REQUIRE(torn_empty_anchor.records.empty());
+    CHECK(torn_empty_anchor.tail == JournalTailKind::Torn);
+    const ForwardChainClassification c4b = classify(empty, &torn_empty_anchor);
+    CHECK(c4b.state == ForwardChainState::AbandonedForwardInit);
+    CHECK(c4b.torn_anchor_debris);
+
+    // Empty journal under an anchor claiming coverage: W7 blocks with the
+    // lost range named.
+    const ParsedAnchorFile a = parse_anchor_ok(bare.anchor);
+    const ForwardChainClassification c5 = classify(empty, &a);
+    CHECK(c5.state == ForwardChainState::Blocked);
+    CHECK(c5.reason == ForwardBlockReason::JournalBelowCoverage);
+    CHECK_MESSAGE(c5.detail.find("lost range") != std::string::npos,
+                  "the lost range must be named: ", c5.detail);
+
+    // Empty journal + foreign-identity anchor: the R11 refusal is what
+    // reports (R11 precedes W7 in the zero-record path too).
+    ChainIdentityInputs wrong_journal{kIdentity + "x", kIdentity};
+    const ForwardChainClassification c6 =
+        classify_forward_chain(empty, &a, wrong_journal);
+    CHECK(c6.state == ForwardChainState::Blocked);
+    CHECK(c6.reason == ForwardBlockReason::IdentityMismatch);
+
+    // W7 precedence in the zero-record path (R15/W7: the journal is shorter
+    // than the anchor's proven prefix, so the coverage refusal is what
+    // reports - whatever the torn head's typing). The identity matches, so
+    // R11 passes and W7 fires with the lost range named.
+    const std::string rs_typed_head =
+        cut_before(ser_first(JournalRecord{make_run_start(2, false)}),
+                   "\"planned_move_count\":2", 2);
+    for (const std::string& head_image : {short_head, rs_typed_head, intent_head}) {
+        const ParsedJournalFile covered = parse_journal_ok(head_image);
+        const ForwardChainClassification hc = classify(covered, &a);
+        CHECK(hc.state == ForwardChainState::Blocked);
+        CHECK(hc.reason == ForwardBlockReason::JournalBelowCoverage);
+        CHECK_MESSAGE(hc.detail.find("lost range") != std::string::npos,
+                      "the lost range must be named: ", hc.detail);
+    }
+}
+
+TEST_CASE("T-66/T-70: R11 identity binding precedes W7 coverage when both fail") {
+    const BuiltChain full =
+        build_chain({JournalRecord{make_run_start(1, false)},
+                     JournalRecord{make_intent(1, 0)},
+                     JournalRecord{make_result(2, 0)}}, 3);
+    const ParsedAnchorFile a = parse_anchor_ok(full.anchor);
+    const std::size_t proven = a.records.back().byte_len;
+    REQUIRE(proven > 10);
+    const std::string truncated = full.journal.substr(0, proven - 10);
+    const ParsedJournalFile short_journal = parse_journal_ok(truncated);
+
+    // Both wrong (foreign journal identity + journal below coverage): the
+    // identity refusal is what reports - the implemented R11-first order,
+    // pinned here.
+    ChainIdentityInputs wrong_journal{kIdentity + "x", kIdentity};
+    const ForwardChainClassification c1 =
+        classify_forward_chain(short_journal, &a, wrong_journal);
+    CHECK(c1.state == ForwardChainState::Blocked);
+    CHECK(c1.reason == ForwardBlockReason::IdentityMismatch);
+
+    // Identity correct + below coverage: the W7 refusal (the mirrored half
+    // of the precedence pair).
+    const ForwardChainClassification c2 =
+        classify_forward_chain(short_journal, &a, kIds);
+    CHECK(c2.state == ForwardChainState::Blocked);
+    CHECK(c2.reason == ForwardBlockReason::JournalBelowCoverage);
+    CHECK_MESSAGE(c2.detail.find("lost range") != std::string::npos,
+                  "the lost range must be named: ", c2.detail);
 }
 
 TEST_CASE("T-47/section 8: dormant ack preserved on declared-inert runs") {
@@ -517,8 +697,9 @@ TEST_CASE("T-63: torn terminal RUN-END with all moves final is terminal and disc
 }
 
 TEST_CASE("T-64 (unit basis): impossible transitions refuse at parse level") {
-    // A forward journal that starts with a RESULT.
-    const std::string image = ser_record(JournalRecord{make_result(0, 0)});
+    // A forward journal that starts with a RESULT. The head carries a valid
+    // genesis prev, so the transition rule is what refuses.
+    const std::string image = ser_first(JournalRecord{make_result(0, 0)});
     const ParsedJournalFile p1 = parse_journal_file(to_bytes(image), kRootKey);
     CHECK_FALSE(p1.valid);
     const ForwardChainClassification c1 = classify_forward_chain(p1, nullptr, kIds);
@@ -527,9 +708,13 @@ TEST_CASE("T-64 (unit basis): impossible transitions refuse at parse level") {
 
     // Records after the terminal RUN-END.
     const std::string end_image =
-        ser_record(JournalRecord{make_run_start(0, false)}) +
-        ser_record(JournalRecord{make_run_end(1, 0)});
-    const std::string after = end_image + ser_record(JournalRecord{make_intent(2, 0)});
+        chain_bytes({JournalRecord{make_run_start(0, false)},
+                     JournalRecord{make_run_end(1, 0)}});
+    const std::string last_line = end_image.substr(line_offset(end_image, 1));
+    const std::string after =
+        end_image +
+        serialize_journal_record(JournalRecord{make_intent(2, 0)}, prev_of(last_line))
+            .canonical;
     const ParsedJournalFile p2 = parse_journal_file(to_bytes(after), kRootKey);
     CHECK_FALSE(p2.valid);
     CHECK(p2.failure.kind == ParseFailureKind::TransitionViolation);
@@ -614,9 +799,8 @@ ParsedJournalFile parse_segment_ok(const std::string& image) {
 }
 
 TEST_CASE("T-59: complete flushed UNDO-INTENT without UNDO-RESULT blocks") {
-    const std::string image =
-        ser_record(JournalRecord{make_undo_start(1)}) +
-        ser_record(JournalRecord{make_undo_intent(1, 0)});
+    const std::string image = chain_bytes({JournalRecord{make_undo_start(1)},
+                                           JournalRecord{make_undo_intent(1, 0)}});
     const ParsedJournalFile seg = parse_segment_ok(image);
     const SegmentClassification c = classify_segment(seg);
     CHECK(c.state == SegmentState::Blocked);
@@ -624,9 +808,8 @@ TEST_CASE("T-59: complete flushed UNDO-INTENT without UNDO-RESULT blocks") {
 }
 
 TEST_CASE("T-62: reopened torn UNDO-INTENT blocks; untyped tail blocks") {
-    const std::string image =
-        ser_record(JournalRecord{make_undo_start(1)}) +
-        ser_record(JournalRecord{make_undo_intent(1, 0)});
+    const std::string image = chain_bytes({JournalRecord{make_undo_start(1)},
+                                           JournalRecord{make_undo_intent(1, 0)}});
     const std::string torn = cut_before(image, "\"type\":\"UNDO-INTENT\"", 14);
     const ParsedJournalFile p1 = parse_segment_ok(torn);
     REQUIRE(p1.tail_type_hint.has_value());
@@ -647,10 +830,9 @@ TEST_CASE("T-62: reopened torn UNDO-INTENT blocks; untyped tail blocks") {
 }
 
 TEST_CASE("T-62b: complete UNDO-RESULT (restored) resolves; T-63 segment torn END") {
-    const std::string image =
-        ser_record(JournalRecord{make_undo_start(1)}) +
-        ser_record(JournalRecord{make_undo_intent(1, 0)}) +
-        ser_record(JournalRecord{make_undo_result(2, 0)});
+    const std::string image = chain_bytes({JournalRecord{make_undo_start(1)},
+                                           JournalRecord{make_undo_intent(1, 0)},
+                                           JournalRecord{make_undo_result(2, 0)}});
     const SegmentClassification c1 = classify_segment(parse_segment_ok(image));
     CHECK(c1.state == SegmentState::CompleteUnterminated);
     CHECK(c1.completed_candidates == 1);
@@ -659,7 +841,10 @@ TEST_CASE("T-62b: complete UNDO-RESULT (restored) resolves; T-63 segment torn EN
     // Torn terminal UNDO-END with all candidates final: the fold decides
     // (R23: attempt_candidate_count makes the terminal-ness decidable).
     const std::string full =
-        image + ser_record(JournalRecord{make_undo_end(3, 1)});
+        chain_bytes({JournalRecord{make_undo_start(1)},
+                     JournalRecord{make_undo_intent(1, 0)},
+                     JournalRecord{make_undo_result(2, 0)},
+                     JournalRecord{make_undo_end(3, 1)}});
     const std::string torn = cut_before(full, "\"type\":\"UNDO-END\"", 14);
     const ParsedJournalFile p2 = parse_segment_ok(torn);
     REQUIRE(p2.tail_type_hint.has_value());
@@ -671,10 +856,10 @@ TEST_CASE("T-62b: complete UNDO-RESULT (restored) resolves; T-63 segment torn EN
 
     // Torn UNDO-END while candidate RESULTs are missing: inconsistent.
     const std::string two =
-        ser_record(JournalRecord{make_undo_start(2)}) +
-        ser_record(JournalRecord{make_undo_intent(1, 0)}) +
-        ser_record(JournalRecord{make_undo_result(2, 0)}) +
-        ser_record(JournalRecord{make_undo_end(3, 2)});
+        chain_bytes({JournalRecord{make_undo_start(2)},
+                     JournalRecord{make_undo_intent(1, 0)},
+                     JournalRecord{make_undo_result(2, 0)},
+                     JournalRecord{make_undo_end(3, 2)}});
     const std::string torn2 = cut_before(two, "\"type\":\"UNDO-END\"", 14);
     const SegmentClassification c3 = classify_segment(parse_segment_ok(torn2));
     CHECK(c3.state == SegmentState::Blocked);
@@ -686,20 +871,42 @@ TEST_CASE("section 6.4: abandoned attempt initialization (torn/zero head)") {
     const SegmentClassification c1 = classify_segment(empty);
     CHECK(c1.state == SegmentState::AbandonedAttemptInit);
 
-    const std::string head = ser_record(JournalRecord{make_undo_start(1)});
+    const std::string head = ser_first(JournalRecord{make_undo_start(1)});
     const std::string torn = cut_before(head, "\"attempt_candidate_count\":1", 2);
     const SegmentClassification c2 = classify_segment(parse_segment_ok(torn));
     CHECK(c2.state == SegmentState::AbandonedAttemptInit);
     CHECK_MESSAGE(c2.detail.find("torn") != std::string::npos,
                   "torn head disclosed: ", c2.detail);
+
+    // A torn head too short to reveal its type is blocked, never an
+    // abandoned initialization (same ratified rule as the forward
+    // classifier).
+    const std::string short_head = head.substr(0, 14);  // `{"v":1,"run":"`
+    const ParsedJournalFile p3 = parse_segment_ok(short_head);
+    CHECK(p3.tail == JournalTailKind::Torn);
+    CHECK_FALSE(p3.tail_type_hint.has_value());
+    const SegmentClassification c3 = classify_segment(p3);
+    CHECK(c3.state == SegmentState::Blocked);
+    CHECK(c3.reason == SegmentBlockReason::UncoveredTailUntyped);
+
+    // Typed evidence of a later undo operation without a valid start:
+    // blocked as an impossible shape.
+    const std::string intent_head =
+        cut_before(ser_first(JournalRecord{make_undo_intent(1, 0)}),
+                   "\"type\":\"UNDO-INTENT\"", 14);
+    const ParsedJournalFile p4 = parse_segment_ok(intent_head);
+    REQUIRE(p4.tail_type_hint.has_value());
+    CHECK(*p4.tail_type_hint == JournalRecordType::UndoIntent);
+    const SegmentClassification c4 = classify_segment(p4);
+    CHECK(c4.state == SegmentState::Blocked);
+    CHECK(c4.reason == SegmentBlockReason::TransitionViolation);
 }
 
 TEST_CASE("Q3 (ratification pending): clean partial segment end resolves as partial") {
     // Interrupted after candidate 0 of 2: candidates 1.. were never attempted.
-    const std::string image =
-        ser_record(JournalRecord{make_undo_start(2)}) +
-        ser_record(JournalRecord{make_undo_intent(1, 0)}) +
-        ser_record(JournalRecord{make_undo_result(2, 0)});
+    const std::string image = chain_bytes({JournalRecord{make_undo_start(2)},
+                                           JournalRecord{make_undo_intent(1, 0)},
+                                           JournalRecord{make_undo_result(2, 0)}});
     const SegmentClassification c1 = classify_segment(parse_segment_ok(image));
     CHECK(c1.state == SegmentState::PartialUnambiguous);
     CHECK(c1.completed_candidates == 1);
@@ -707,7 +914,7 @@ TEST_CASE("Q3 (ratification pending): clean partial segment end resolves as part
                   "disclosure present: ", c1.detail);
 
     // Interrupted before the first candidate: same proof with k = 0.
-    const std::string head = ser_record(JournalRecord{make_undo_start(2)});
+    const std::string head = chain_bytes({JournalRecord{make_undo_start(2)}});
     const SegmentClassification c2 = classify_segment(parse_segment_ok(head));
     CHECK(c2.state == SegmentState::PartialUnambiguous);
     CHECK(c2.completed_candidates == 0);
@@ -721,7 +928,7 @@ TEST_CASE("T-73 (basis): verify_segment_digest binds the segment to the forward 
 
     JournalUndoStart us = make_undo_start(1);
     us.fwd_journal_digest = journal_hex(h.digest);
-    const std::string segment = ser_record(JournalRecord{us});
+    const std::string segment = chain_bytes({JournalRecord{us}});
     const ParsedJournalFile seg = parse_segment_ok(segment);
 
     const BindingCheck ok = verify_segment_digest(seg, to_bytes(forward));

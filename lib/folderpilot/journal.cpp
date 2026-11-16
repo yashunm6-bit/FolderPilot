@@ -252,14 +252,22 @@ bool append_open(std::string& out, std::string& error, std::string_view run, Jou
     return true;
 }
 
-bool append_move_evidence(std::string& out, std::string& error, unsigned long long move_id,
+bool append_move_evidence(std::string& out, std::string& error, bool with_move_id,
+                          unsigned long long move_id,
                           const std::string& cat_id, const std::string& file_id,
                           unsigned long long file_ctime, unsigned long long file_size,
                           unsigned long long file_mtime, const std::string& source_name,
                           const std::string& dest_name, Category dest_cat) {
-    if (move_id > journal_seq_max) {
-        error = "move id exceeds the 8-digit ceiling";
-        return false;
+    // Undo records identify the reversed move with undo_of_move alone; the
+    // move_id member exists on forward INTENT/RESULT only (docs section 5,
+    // undo-attempt schema).
+    if (with_move_id) {
+        if (move_id > journal_seq_max) {
+            error = "move id exceeds the 8-digit ceiling";
+            return false;
+        }
+        out += ",\"move_id\":";
+        append_u64(out, move_id);
     }
     if (!check_identity(error, cat_id, "cat_id")) {
         return false;
@@ -277,8 +285,6 @@ bool append_move_evidence(std::string& out, std::string& error, unsigned long lo
         error = "dest_cat is not a valid category";
         return false;
     }
-    out += ",\"move_id\":";
-    append_u64(out, move_id);
     out += ",\"cat_id\":";
     append_json_string(out, cat_id);
     out += ",\"file_id\":";
@@ -406,7 +412,7 @@ Body build_body(const JournalIntent& r) {
     if (!append_open(out, b.error, r.run, JournalDir::Forward, "INTENT", r.seq, r.root_run_seq)) {
         return b;
     }
-    if (!append_move_evidence(out, b.error, r.move_id, r.cat_id, r.file_id, r.file_ctime,
+    if (!append_move_evidence(out, b.error, true, r.move_id, r.cat_id, r.file_id, r.file_ctime,
                               r.file_size, r.file_mtime, r.source_name, r.dest_name,
                               r.dest_cat)) {
         return b;
@@ -422,7 +428,7 @@ Body build_body(const JournalResult& r) {
     if (!append_open(out, b.error, r.run, JournalDir::Forward, "RESULT", r.seq, r.root_run_seq)) {
         return b;
     }
-    if (!append_move_evidence(out, b.error, r.move_id, r.cat_id, r.file_id, r.file_ctime,
+    if (!append_move_evidence(out, b.error, true, r.move_id, r.cat_id, r.file_id, r.file_ctime,
                               r.file_size, r.file_mtime, r.source_name, r.dest_name,
                               r.dest_cat)) {
         return b;
@@ -520,7 +526,7 @@ Body build_body(const JournalUndoIntent& r) {
     if (!append_undo_move_ids(out, b.error, r.attempt_move_seq, r.undo_of_move)) {
         return b;
     }
-    if (!append_move_evidence(out, b.error, r.undo_of_move, r.cat_id, r.file_id, r.file_ctime,
+    if (!append_move_evidence(out, b.error, false, r.undo_of_move, r.cat_id, r.file_id, r.file_ctime,
                               r.file_size, r.file_mtime, r.source_name, r.dest_name,
                               r.dest_cat)) {
         return b;
@@ -543,7 +549,7 @@ Body build_body(const JournalUndoResult& r) {
     if (!append_undo_move_ids(out, b.error, r.attempt_move_seq, r.undo_of_move)) {
         return b;
     }
-    if (!append_move_evidence(out, b.error, r.undo_of_move, r.cat_id, r.file_id, r.file_ctime,
+    if (!append_move_evidence(out, b.error, false, r.undo_of_move, r.cat_id, r.file_id, r.file_ctime,
                               r.file_size, r.file_mtime, r.source_name, r.dest_name,
                               r.dest_cat)) {
         return b;
@@ -638,6 +644,7 @@ struct LineParser {
     ParseFailureKind kind = ParseFailureKind::NonCanonicalEncoding;
     std::size_t offset = 0;       // within the line
     std::vector<std::string_view> seen_keys;
+    std::size_t members_seen = 0; // members accepted so far in this record
     const std::vector<std::string_view>* schema_keys = nullptr;
 
     bool fail(ParseFailureKind k, std::string message, std::size_t line_pos) {
@@ -677,10 +684,15 @@ struct LineParser {
         return fail(ParseFailureKind::NonCanonicalEncoding, std::move(msg), offset);
     }
 
-    // Reads `"<name>"` (schema keys never contain escapes). On mismatch the
-    // failure is classified: duplicate, misordered, or unknown key.
+    // Reads `","` before every member after the first, then `"<name>"` and
+    // `':'`. Canonical members are exactly comma-separated: missing, double,
+    // leading and trailing commas all fail here. On mismatch the failure is
+    // classified: duplicate, misordered, or unknown key.
     bool expect_key(std::string_view name) {
         const std::size_t key_start = offset;
+        if (members_seen != 0 && !expect(',', "',' between members")) {
+            return false;
+        }
         if (!consume('"')) {
             return fail(ParseFailureKind::NonCanonicalEncoding, "expected a key string",
                         key_start);
@@ -730,18 +742,24 @@ struct LineParser {
                         offset);
         }
         seen_keys.push_back(observed);
+        ++members_seen;
         return true;
     }
 
-    // Peeks for a key without consuming on mismatch.
+    // Peeks for a key without consuming on mismatch. A failed lookahead
+    // restores every piece of parser state: offset, error, failure kind and
+    // the member count (`seen_keys` only ever grows on success, so it needs
+    // no restore).
     bool try_expect_key(std::string_view name) {
         const std::size_t saved_offset = offset;
+        const std::size_t saved_members = members_seen;
         const std::string saved_error = error;
         const ParseFailureKind saved_kind = kind;
         if (expect_key(name)) {
             return true;
         }
         offset = saved_offset;
+        members_seen = saved_members;
         error = saved_error;
         kind = saved_kind;
         return false;
@@ -1914,15 +1932,21 @@ JournalHashResult journal_genesis_prev(std::string_view root_key,
 
 namespace {
 
-bool assemble_record_line(const Body& body, std::string& out, std::string& error) {
+// Appends the `integrity` member and the terminating LF. `core` holds the
+// canonical record bytes that the hash covers: everything before the
+// `integrity` member (including `prev` when the record carries one), with
+// the closing brace re-appended - exactly the bytes the parser reconstructs
+// when it verifies the hash. The terminating LF is never hashed.
+bool assemble_record_line(std::string& core, std::string& out, std::string& error) {
     const platform::Sha256Result h = platform::sha256(std::span<const unsigned char>(
-        reinterpret_cast<const unsigned char*>(body.bytes.data()), body.bytes.size()));
+        reinterpret_cast<const unsigned char*>(core.data()), core.size()));
     if (!h.ok) {
         error = "SHA-256 provider failed: " + h.error;
         return false;
     }
-    out.reserve(body.bytes.size() + journal_hex_chars + 16);
-    out.append(body.bytes, 0, body.bytes.size() - 1);  // drop the closing brace
+    out.reserve(core.size() + journal_hex_chars + 16);
+    out = std::move(core);
+    out.pop_back();  // drop the closing brace; the integrity member follows
     out += ",\"integrity\":\"";
     out += hex_of(h.digest);
     out += "\"}\n";
@@ -1944,8 +1968,16 @@ JournalSerializeResult serialize_journal_record(const JournalRecord& record,
         result.error = body.error;
         return result;
     }
+    // Insert `prev` as the second-to-last member: the hashed core is the
+    // body with `prev` before the closing brace, `integrity` excluded.
+    std::string core;
+    core.reserve(body.bytes.size() + journal_hex_chars + 12);
+    core.append(body.bytes, 0, body.bytes.size() - 1);  // drop the closing brace
+    core += ",\"prev\":\"";
+    core += prev_hex;
+    core += "\"}";
     std::string line;
-    if (!assemble_record_line(body, line, result.error)) {
+    if (!assemble_record_line(core, line, result.error)) {
         return result;
     }
     if (line.size() > journal_max_record_bytes) {
@@ -2020,8 +2052,10 @@ JournalSerializeResult serialize_anchor_record(const AnchorRecord& record) {
         result.error = body.error;
         return result;
     }
+    // Anchor records carry no `prev`: the hashed core is the body as built.
+    std::string core = body.bytes;
     std::string line;
-    if (!assemble_record_line(body, line, result.error)) {
+    if (!assemble_record_line(core, line, result.error)) {
         return result;
     }
     if (line.size() > 450) {
@@ -2097,7 +2131,9 @@ ParsedJournalFile parse_journal_file(std::span<const unsigned char> bytes,
             out.failure.detail = "empty line is not a canonical record";
             return out;
         }
-        if (length > journal_max_record_bytes) {
+        // The ratified caps cover the stored record including its
+        // terminating LF (docs section 5); `length` excludes it.
+        if (length + 1 > journal_max_record_bytes) {
             out.failure.kind = ParseFailureKind::CapExceeded;
             out.failure.offset = start;
             out.failure.detail = "record exceeds the 8 KiB cap";
@@ -2118,6 +2154,14 @@ ParsedJournalFile parse_journal_file(std::span<const unsigned char> bytes,
     if (split.has_tail) {
         const std::string_view tail = image.substr(split.tail_start);
         if (!tail.empty()) {
+            // The tail is the record's canonical bytes minus the terminating
+            // LF; the cap covers the LF too (docs section 5).
+            if (tail.size() + 1 > journal_max_record_bytes) {
+                out.failure.kind = ParseFailureKind::CapExceeded;
+                out.failure.offset = split.tail_start;
+                out.failure.detail = "record exceeds the 8 KiB cap";
+                return out;
+            }
             ParseContext tail_ctx = ctx;
             const LineOutcome lo = validate_line(tail, split.tail_start, image, index,
                                                  tail_ctx, prev_line_bytes);
@@ -2308,7 +2352,9 @@ ParsedAnchorFile parse_anchor_file(std::span<const unsigned char> bytes) {
             out.failure.detail = "empty line is not a canonical record";
             return out;
         }
-        if (length > 450) {
+        // The ratified caps cover the stored record including its
+        // terminating LF (docs section 5); `length` excludes it.
+        if (length + 1 > 450) {
             out.failure.kind = ParseFailureKind::CapExceeded;
             out.failure.offset = start;
             out.failure.detail = "anchor record exceeds the 450-byte ceiling";
@@ -2327,6 +2373,14 @@ ParsedAnchorFile parse_anchor_file(std::span<const unsigned char> bytes) {
     if (split.has_tail) {
         const std::string_view tail = image.substr(split.tail_start);
         if (!tail.empty()) {
+            // The tail is the anchor record's canonical bytes minus the
+            // terminating LF; the ceiling covers the LF too (docs section 5).
+            if (tail.size() + 1 > 450) {
+                out.failure.kind = ParseFailureKind::CapExceeded;
+                out.failure.offset = split.tail_start;
+                out.failure.detail = "anchor record exceeds the 450-byte ceiling";
+                return out;
+            }
             AnchorLine al;
             ParseFailure failure;
             if (validate_anchor_line(tail, split.tail_start, image, index, al, failure,

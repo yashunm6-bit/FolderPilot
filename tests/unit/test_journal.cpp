@@ -12,6 +12,7 @@
 
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -202,6 +203,86 @@ ParsedJournalFile parse_ok(const std::string& bytes) {
     return p;
 }
 
+// Serializes one record as record 0 of its file: `prev` is the ratified
+// genesis seed (the parser verifies record 0 against it).
+std::string ser_first(const JournalRecord& rec) {
+    unsigned long long root_run_seq = 0;
+    std::string run;
+    std::visit([&](const auto& r) {
+        root_run_seq = r.root_run_seq;
+        run = r.run;
+    }, rec);
+    const JournalHashResult genesis = journal_genesis_prev(kRootKey, root_run_seq, run);
+    REQUIRE(genesis.ok);
+    const JournalSerializeResult r = serialize_journal_record(rec, genesis.hex);
+    REQUIRE_MESSAGE(r.ok, "serialize failed: ", r.error);
+    return r.canonical;
+}
+
+// Serializes a whole record sequence: the genesis seed and the prev chain
+// are computed by the serializer, exactly as a writer would.
+std::string chain_image(const std::vector<JournalRecord>& records) {
+    const JournalSerializeResult r = serialize_journal_chain(records, kRootKey);
+    REQUIRE_MESSAGE(r.ok, "chain serialize failed: ", r.error);
+    return r.canonical;
+}
+
+// Byte offset of line `index` (0-based) within a serialized image.
+std::size_t line_offset(const std::string& image, std::size_t index) {
+    std::size_t pos = 0;
+    for (std::size_t i = 0; i < index; ++i) {
+        const std::size_t nl = image.find('\n', pos);
+        REQUIRE(nl != std::string::npos);
+        pos = nl + 1;
+    }
+    return pos;
+}
+
+// Replaces the first `from`->`to` occurrence at or after `begin`; fails the
+// test when the target is missing (or would patch an earlier line).
+bool patch_from(std::string& text, std::size_t begin, std::string_view from,
+                std::string_view to) {
+    const std::size_t pos = text.find(from, begin);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    text.replace(pos, from.size(), to);
+    return true;
+}
+
+// Minimal valid record sequence containing `rec` at the position its `seq`
+// names: the parser's expected-record machine requires a START head and
+// gap-free per-move INTENT/RESULT pairing, so a bare later-record line is
+// never a parseable file by itself.
+std::vector<JournalRecord> file_containing(const JournalRecord& rec) {
+    switch (rec.index()) {
+        case 0:  // RUN-START
+            return {rec};
+        case 1:  // INTENT
+            return {JournalRecord{make_run_start(1, false)}, rec};
+        case 2:  // RESULT
+            return {JournalRecord{make_run_start(1, false)},
+                    JournalRecord{make_intent(1, 0)}, rec};
+        case 3:  // RUN-END
+            return {JournalRecord{make_run_start(2, false)},
+                    JournalRecord{make_intent(1, 0)},
+                    JournalRecord{make_result(2, 0)},
+                    JournalRecord{make_intent(3, 1)},
+                    JournalRecord{make_result(4, 1)}, rec};
+        case 4:  // UNDO-START
+            return {rec};
+        case 5:  // UNDO-INTENT
+            return {JournalRecord{make_undo_start(1)}, rec};
+        case 6:  // UNDO-RESULT
+            return {JournalRecord{make_undo_start(1)},
+                    JournalRecord{make_undo_intent(1, 0)}, rec};
+        default:  // UNDO-END
+            return {JournalRecord{make_undo_start(1)},
+                    JournalRecord{make_undo_intent(1, 0)},
+                    JournalRecord{make_undo_result(2, 0)}, rec};
+    }
+}
+
 // Serializes one record with a fixed dummy prev (identical byte length to
 // any real one).
 std::string ser(const JournalRecord& rec) {
@@ -249,13 +330,19 @@ TEST_CASE("T-08: record round-trips for every journal record class") {
         JournalRecord{make_undo_end(3, 1)},
     };
     for (const JournalRecord& original : samples) {
-        const std::string line = ser(original);
-        CAPTURE(line);
-        const ParsedJournalFile p = parse_ok(line);
-        REQUIRE(p.records.size() == 1);
-        CHECK(p.records[0] == original);
-        // Canonical stability: re-serialization is byte-identical (T-15).
-        CHECK(serialize_journal_record(p.records[0], hex64()).canonical == line);
+        CAPTURE(original.index());
+        const std::vector<JournalRecord> file = file_containing(original);
+        const std::string image = chain_image(file);
+        const ParsedJournalFile p = parse_ok(image);
+        REQUIRE(p.records.size() == file.size());
+        // The sample sits at the position its seq names (the last record).
+        CHECK(p.records.back() == original);
+        // Canonical stability: re-serializing the parsed records recomputes
+        // the genesis seed and the prev chain from the same fields, so it
+        // reuses the same prev values and is byte-identical (T-15).
+        const JournalSerializeResult again = serialize_journal_chain(p.records, kRootKey);
+        REQUIRE(again.ok);
+        CHECK(again.canonical == image);
     }
 }
 
@@ -272,22 +359,32 @@ TEST_CASE("T-08: anchor record round-trip") {
 TEST_CASE("T-10: unicode names and escaped detail round-trip; invalid UTF-8 rejected") {
     JournalIntent unicode = make_intent(1, 0);
     unicode.source_name = "caf\xc3\xa9 \xe2\x98\x95.txt";  // café ☕.txt
-    const std::string line = ser(JournalRecord{unicode});
-    const ParsedJournalFile p = parse_ok(line);
-    REQUIRE(p.records.size() == 1);
-    CHECK(std::get<JournalIntent>(p.records[0]).source_name == unicode.source_name);
+    const ParsedJournalFile p =
+        parse_ok(chain_image({JournalRecord{make_run_start(1, false)},
+                              JournalRecord{unicode}}));
+    REQUIRE(p.records.size() == 2);
+    CHECK(std::get<JournalIntent>(p.records[1]).source_name == unicode.source_name);
 
     JournalResult with_escapes = make_result(2, 0, JournalOutcome::Moved, "l1\nl2 \"q\"");
-    const std::string line2 = ser(JournalRecord{with_escapes});
-    const ParsedJournalFile p2 = parse_ok(line2);
-    CHECK(p2.records[0] == JournalRecord{with_escapes});
+    const ParsedJournalFile p2 =
+        parse_ok(chain_image({JournalRecord{make_run_start(1, false)},
+                              JournalRecord{make_intent(1, 0)},
+                              JournalRecord{with_escapes}}));
+    REQUIRE(p2.records.size() == 3);
+    CHECK(p2.records[2] == JournalRecord{with_escapes});
 
-    // Raw invalid UTF-8 injected into an otherwise canonical line.
+    // Raw invalid UTF-8 injected into an otherwise valid two-record chain
+    // (inside the quotes, so the value still parses as a string and the
+    // failure is the encoding itself, not a missing quote).
     for (const char* bad : {"caf\xc3\x28.txt", "bad\xed\xa0\x80.txt", "cut\xc3"}) {
-        std::string good = ser(JournalRecord{make_intent(1, 0)});
-        REQUIRE(replace_first(good, "\"report.pdf\"", bad));
+        std::string good = chain_image({JournalRecord{make_run_start(1, false)},
+                                        JournalRecord{make_intent(1, 0)}});
+        const std::string injected = std::string("\"") + bad + "\"";
+        REQUIRE_MESSAGE(patch_from(good, line_offset(good, 1), "\"report.pdf\"", injected),
+                        "utf-8 patch target missing");
         const ParsedJournalFile p3 = parse_journal_file(to_bytes(good), kRootKey);
         CHECK_MESSAGE(!p3.valid, "parser accepted invalid UTF-8: ", bad);
+        CHECK(p3.failure.kind == ParseFailureKind::InvalidUtf8);
     }
 }
 
@@ -311,6 +408,16 @@ TEST_CASE("T-11: truncation at every byte offset of a small journal is detected"
         const ParsedJournalFile p =
             parse_journal_file(to_bytes(image.substr(0, k)), kRootKey);
         CHECK(p.valid);
+        if (k == 0) {
+            // The zero-byte prefix is the clean empty file: valid, no
+            // records, no tail bytes, nothing unterminated.
+            CHECK(p.tail == JournalTailKind::CleanEof);
+            CHECK(p.records.empty());
+            CHECK(p.tail_bytes.empty());
+            CHECK_FALSE(p.unterminated_final_record);
+            previous_records = 0;
+            continue;
+        }
         CHECK(p.records.size() >= previous_records);
         previous_records = p.records.size();
         CHECK(p.records.size() <= records.size());
@@ -332,6 +439,13 @@ TEST_CASE("T-11: truncation at every byte offset of a small journal is detected"
             CHECK(p.tail == JournalTailKind::CleanEof);
             CHECK(p.unterminated_final_record);
             CHECK(p.records.size() == records.size());
+        } else if (image[k - 1] == '}') {
+            // R2 at an interior record: only the terminating LF was cut, so
+            // the record still validates as unterminated-but-complete (no
+            // torn bytes).
+            CHECK(p.tail == JournalTailKind::CleanEof);
+            CHECK(p.unterminated_final_record);
+            CHECK(p.tail_bytes.empty());
         } else {
             CHECK(p.tail == JournalTailKind::Torn);
             const std::size_t tail_start =
@@ -367,9 +481,9 @@ TEST_CASE("T-11: torn-tail type hints (typed INTENT tail; short tail untyped)") 
 
 TEST_CASE("T-11: seq must equal the record position") {
     const JournalRunStart rs = make_run_start(1, false);
-    const JournalHashResult genesis = journal_genesis_prev(kRootKey, kRootRunSeq, kRun);
-    REQUIRE(genesis.ok);
-    const std::string line0 = ser(JournalRecord{rs});
+    // Record 0 must carry the genesis seed for the parse to reach the
+    // intended seq-position failure.
+    const std::string line0 = ser_first(JournalRecord{rs});
     // Serialize a second record whose seq does not match its position: the
     // writer primitive permits it, the parser must reject it.
     const JournalSerializeResult line1 =
@@ -421,53 +535,77 @@ TEST_CASE("T-11: anchor_seq/covered_seq/byte_len ordering and identity rules are
 // ---------------------------------------------------------------------------
 
 TEST_CASE("T-12: unknown v, unknown type, and direction/type mismatch are invalid") {
-    const std::string line = ser(JournalRecord{make_intent(1, 0)});
+    // A valid two-record chain; every patch lands on the INTENT line so the
+    // intended check is what refuses (the head stays parseable).
+    const std::string image = chain_image({JournalRecord{make_run_start(1, false)},
+                                           JournalRecord{make_intent(1, 0)}});
+    const std::size_t intent_line = line_offset(image, 1);
 
-    std::string v2 = line;
-    REQUIRE(replace_first(v2, "\"v\":1", "\"v\":2"));
-    CHECK_FALSE(parse_journal_file(to_bytes(v2), kRootKey).valid);
+    std::string v2 = image;
+    REQUIRE_MESSAGE(patch_from(v2, intent_line, "\"v\":1", "\"v\":2"), "v patch missing");
+    const ParsedJournalFile pv = parse_journal_file(to_bytes(v2), kRootKey);
+    REQUIRE_FALSE(pv.valid);
+    CHECK(pv.failure.kind == ParseFailureKind::UnknownTypeOrVersion);
 
-    std::string foreign_type = line;
-    REQUIRE(replace_first(foreign_type, "\"type\":\"INTENT\"", "\"type\":\"NOPE\""));
+    std::string foreign_type = image;
+    REQUIRE_MESSAGE(patch_from(foreign_type, intent_line,
+                               "\"type\":\"INTENT\"", "\"type\":\"NOPE\""),
+                    "type patch missing");
     const ParsedJournalFile p = parse_journal_file(to_bytes(foreign_type), kRootKey);
     REQUIRE_FALSE(p.valid);
     CHECK(p.failure.kind == ParseFailureKind::UnknownTypeOrVersion);
 
-    std::string undo_type = line;
-    REQUIRE(replace_first(undo_type, "\"type\":\"INTENT\"", "\"type\":\"UNDO-START\""));
-    CHECK_FALSE(parse_journal_file(to_bytes(undo_type), kRootKey).valid);
+    std::string undo_type = image;
+    REQUIRE_MESSAGE(patch_from(undo_type, intent_line,
+                               "\"type\":\"INTENT\"", "\"type\":\"UNDO-START\""),
+                    "undo-type patch missing");
+    const ParsedJournalFile p2 = parse_journal_file(to_bytes(undo_type), kRootKey);
+    REQUIRE_FALSE(p2.valid);
+    CHECK(p2.failure.kind == ParseFailureKind::TransitionViolation);
 
-    std::string foreign_dir = line;
-    REQUIRE(replace_first(foreign_dir, "\"dir\":\"forward\"", "\"dir\":\"sideways\""));
-    CHECK_FALSE(parse_journal_file(to_bytes(foreign_dir), kRootKey).valid);
+    std::string foreign_dir = image;
+    REQUIRE_MESSAGE(patch_from(foreign_dir, intent_line,
+                               "\"dir\":\"forward\"", "\"dir\":\"sideways\""),
+                    "dir patch missing");
+    const ParsedJournalFile p3 = parse_journal_file(to_bytes(foreign_dir), kRootKey);
+    REQUIRE_FALSE(p3.valid);
+    CHECK(p3.failure.kind == ParseFailureKind::UnknownTypeOrVersion);
 }
 
 TEST_CASE("T-13: duplicate, unknown and misordered keys are rejected") {
-    const std::string line = ser(JournalRecord{make_intent(1, 0)});
+    const std::string image = chain_image({JournalRecord{make_run_start(1, false)},
+                                           JournalRecord{make_intent(1, 0)},
+                                           JournalRecord{make_result(2, 0)}});
+    const std::size_t intent_line = line_offset(image, 1);
+    const std::size_t result_line = line_offset(image, 2);
 
-    // Duplicate key: a second "cat_id" where "file_id" belongs.
-    std::string dup = line;
-    REQUIRE(replace_first(dup, "\"file_id\"", "\"cat_id\""));
+    // Duplicate key: a second "cat_id" where "file_id" belongs (INTENT line).
+    std::string dup = image;
+    REQUIRE_MESSAGE(patch_from(dup, intent_line, "\"file_id\"", "\"cat_id\""),
+                    "dup patch missing");
     const ParsedJournalFile p1 = parse_journal_file(to_bytes(dup), kRootKey);
     REQUIRE_FALSE(p1.valid);
     CHECK(p1.failure.kind == ParseFailureKind::DuplicateKey);
 
-    // Unknown key.
-    std::string unknown = line;
-    REQUIRE(replace_first(unknown, "\"file_id\"", "\"wat_id\""));
+    // Unknown key (INTENT line).
+    std::string unknown = image;
+    REQUIRE_MESSAGE(patch_from(unknown, intent_line, "\"file_id\"", "\"wat_id\""),
+                    "unknown patch missing");
     const ParsedJournalFile p2 = parse_journal_file(to_bytes(unknown), kRootKey);
     REQUIRE_FALSE(p2.valid);
     CHECK(p2.failure.kind == ParseFailureKind::UnknownField);
 
-    // Misordered key: move source_name ahead of file_ctime.
-    std::string reordered = ser(JournalRecord{make_result(2, 0)});
-    const std::size_t source = reordered.find("\"source_name\":");
+    // Misordered key: move source_name ahead of file_ctime (RESULT line).
+    std::string reordered = image;
+    const std::size_t source = reordered.find("\"source_name\":", result_line);
     REQUIRE(source != std::string::npos);
     const std::size_t field_end = reordered.find(',', source);
     REQUIRE(field_end != std::string::npos);
     const std::string field = reordered.substr(source, field_end - source + 1);
     reordered.erase(source, field.size());
-    REQUIRE(replace_first(reordered, "\"file_ctime\":", field + "\"file_ctime\":"));
+    REQUIRE_MESSAGE(patch_from(reordered, result_line, "\"file_ctime\":",
+                               field + "\"file_ctime\":"),
+                    "reorder insert target missing");
     const ParsedJournalFile p3 = parse_journal_file(to_bytes(reordered), kRootKey);
     REQUIRE_FALSE(p3.valid);
     CHECK(p3.failure.kind == ParseFailureKind::NonCanonicalEncoding);
@@ -479,14 +617,16 @@ TEST_CASE("T-13: duplicate, unknown and misordered keys are rejected") {
 
 TEST_CASE("T-13: acknowledgement pairing contradictions are invalid") {
     // acknowledged:true without supersedes_root_run_seq - the parser demands
-    // the pair right after the flag (schema order, before integrity).
-    std::string line = ser(JournalRecord{make_run_start(2, true)});
+    // the pair right after the flag (schema order, before integrity). The
+    // head itself is valid (genesis prev), so the pairing is what fails.
+    std::string line = ser_first(JournalRecord{make_run_start(2, true)});
     REQUIRE(replace_first(line, ",\"supersedes_root_run_seq\":3", ""));
     const ParsedJournalFile p1 = parse_journal_file(to_bytes(line), kRootKey);
     CHECK_FALSE(p1.valid);
 
-    // Explicit false is not a canonical shape (docs section 8).
-    std::string injected = ser(JournalRecord{make_run_start(2, false)});
+    // Explicit false is not a canonical shape (docs section 8), injected
+    // into an otherwise valid RUN-START.
+    std::string injected = ser_first(JournalRecord{make_run_start(2, false)});
     REQUIRE(replace_first(injected, ",\"prev\":",
                           ",\"undo_window_acknowledged\":false,\"prev\":"));
     const ParsedJournalFile p2 = parse_journal_file(to_bytes(injected), kRootKey);
@@ -495,23 +635,35 @@ TEST_CASE("T-13: acknowledgement pairing contradictions are invalid") {
 }
 
 TEST_CASE("T-13: outcome vocabulary and category contradictions are invalid") {
+    const std::string image = chain_image({JournalRecord{make_run_start(1, false)},
+                                           JournalRecord{make_intent(1, 0)},
+                                           JournalRecord{make_result(2, 0)}});
+    const std::size_t result_line = line_offset(image, 2);
+    const std::size_t intent_line = line_offset(image, 1);
+
     // 'restored' is illegal in a forward RESULT (schema-level check).
-    std::string line = ser(JournalRecord{make_result(2, 0)});
-    REQUIRE(replace_first(line, "\"outcome\":\"Moved\"", "\"outcome\":\"restored\""));
+    std::string line = image;
+    REQUIRE_MESSAGE(patch_from(line, result_line, "\"outcome\":\"Moved\"",
+                               "\"outcome\":\"restored\""),
+                    "outcome patch missing");
     const ParsedJournalFile p1 = parse_journal_file(to_bytes(line), kRootKey);
     REQUIRE_FALSE(p1.valid);
     CHECK(p1.failure.kind == ParseFailureKind::CorrelationAnomaly);
 
     // Unknown outcome name.
-    std::string oline = ser(JournalRecord{make_result(2, 0)});
-    REQUIRE(replace_first(oline, "\"outcome\":\"Moved\"", "\"outcome\":\"Wibbled\""));
+    std::string oline = image;
+    REQUIRE_MESSAGE(patch_from(oline, result_line, "\"outcome\":\"Moved\"",
+                               "\"outcome\":\"Wibbled\""),
+                    "outcome-name patch missing");
     const ParsedJournalFile p2 = parse_journal_file(to_bytes(oline), kRootKey);
     REQUIRE_FALSE(p2.valid);
     CHECK(p2.failure.kind == ParseFailureKind::WrongValueType);
 
-    // Unknown category name.
-    std::string iline = ser(JournalRecord{make_intent(1, 0)});
-    REQUIRE(replace_first(iline, "\"dest_cat\":\"Documents\"", "\"dest_cat\":\"Finance\""));
+    // Unknown category name (INTENT line).
+    std::string iline = image;
+    REQUIRE_MESSAGE(patch_from(iline, intent_line, "\"dest_cat\":\"Documents\"",
+                               "\"dest_cat\":\"Finance\""),
+                    "category patch missing");
     const ParsedJournalFile p3 = parse_journal_file(to_bytes(iline), kRootKey);
     REQUIRE_FALSE(p3.valid);
     CHECK(p3.failure.kind == ParseFailureKind::WrongValueType);
@@ -520,9 +672,8 @@ TEST_CASE("T-13: outcome vocabulary and category contradictions are invalid") {
 TEST_CASE("T-13: run and per-segment continuity are enforced (with a positive control)") {
     const JournalHashResult genesis = journal_genesis_prev(kRootKey, kRootRunSeq, kRun);
     REQUIRE(genesis.ok);
-    const std::string line0 = ser(JournalRecord{make_run_start(1, false)});
-    const std::string p1_hex = prev_of(line0);
-    (void)p1_hex;
+    // Record 0 carries the genesis seed, so the positive control parses.
+    const std::string line0 = ser_first(JournalRecord{make_run_start(1, false)});
 
     // Positive control: matching run parses.
     const std::string ok_line1 =
@@ -542,7 +693,7 @@ TEST_CASE("T-13: run and per-segment continuity are enforced (with a positive co
     CHECK(p2.failure.kind == ParseFailureKind::ContinuityMismatch);
 
     // undo_attempt_seq discontinuity within a segment.
-    const std::string seg0 = ser(JournalRecord{make_undo_start(1)});
+    const std::string seg0 = ser_first(JournalRecord{make_undo_start(1)});
     JournalUndoIntent intent = make_undo_intent(1, 0);
     intent.undo_attempt_seq = 99;
     const JournalSerializeResult seg1 =
@@ -566,7 +717,7 @@ TEST_CASE("T-13: run and per-segment continuity are enforced (with a positive co
 }
 
 TEST_CASE("T-13: chain breaks and genesis seeds are enforced") {
-    const std::string line0 = ser(JournalRecord{make_run_start(1, false)});
+    const std::string line0 = ser_first(JournalRecord{make_run_start(1, false)});
     // Second record whose prev does not chain to record 0.
     const JournalSerializeResult bad_line1 =
         serialize_journal_record(JournalRecord{make_intent(1, 0)}, hex64('e'));
@@ -577,7 +728,7 @@ TEST_CASE("T-13: chain breaks and genesis seeds are enforced") {
     CHECK(p1.failure.kind == ParseFailureKind::ChainBreak);
 
     // Wrong genesis seed: the same journal under a different root_key.
-    const std::string image = ser(JournalRecord{make_run_start(1, false)});
+    const std::string image = ser_first(JournalRecord{make_run_start(1, false)});
     const ParsedJournalFile p2 = parse_journal_file(to_bytes(image), "other-root-key");
     REQUIRE_FALSE(p2.valid);
     CHECK(p2.failure.kind == ParseFailureKind::ChainBreak);
@@ -622,8 +773,9 @@ TEST_CASE("T-14: field caps are enforced by the serializer") {
 TEST_CASE("T-14: the parser refuses counts above the operational limit") {
     // A canonical line with planned_move_count 1501 cannot come from the
     // serializer; patching it breaks integrity, and the parser refuses
-    // either way (cap or hash - both are refusals).
-    std::string patched = ser(JournalRecord{make_run_start(2, false)});
+    // either way (cap or hash - both are refusals). The head itself is
+    // genesis-valid so the patched count is what the parse meets.
+    std::string patched = ser_first(JournalRecord{make_run_start(2, false)});
     REQUIRE(replace_first(patched, "\"planned_move_count\":2", "\"planned_move_count\":1501"));
     CHECK_FALSE(parse_journal_file(to_bytes(patched), kRootKey).valid);
 }
@@ -632,7 +784,80 @@ TEST_CASE("T-14: oversize input is refused") {
     std::vector<unsigned char> big(journal_max_file_bytes + 1, 'a');
     const ParsedJournalFile p = parse_journal_file(big, kRootKey);
     CHECK_FALSE(p.valid);
-    CHECK(p.failure.kind == ParseFailureKind::OversizeFile);
+    CHECK(p.failure.kind == ParseFailureKind::CapExceeded);
+}
+
+TEST_CASE("T-14: the 8 KiB record cap counts the terminating LF") {
+    // The ratified cap covers the stored record including its terminating
+    // LF (docs section 5). Pad an otherwise-parseable maximal RUN-START
+    // line inside root_path's value to reach the boundary from both sides:
+    // at stored size 8,192 the oversized field is what refuses; at 8,193
+    // the record cap refuses first.
+    JournalRunStart max_start = make_run_start(journal_move_limit, true);
+    max_start.run = std::string(journal_run_max_bytes, 'r');
+    max_start.root_run_seq = kU64Max;
+    max_start.volume = std::string(journal_volume_max_bytes, 'v');
+    max_start.root_path = std::string(journal_root_path_max_bytes, 'p');
+    max_start.supersedes_root_run_seq = kU64Max;
+    const std::string base = ser(JournalRecord{max_start});
+    REQUIRE(base.size() == 4831);  // byte pin: maximal RUN-START incl. LF
+    const std::size_t pad_at_cap = journal_max_record_bytes - base.size();
+    const std::string marker = "\"root_path\":\"";
+    const std::size_t found = base.find(marker);
+    REQUIRE(found != std::string::npos);
+    const std::size_t insert_at = found + marker.size();
+
+    const auto padded = [&](std::size_t pad) {
+        std::string line = base;
+        line.insert(insert_at, pad, 'p');
+        return line;
+    };
+
+    // Stored exactly 8,192 (cap inclusive): the record-cap check passes and
+    // the oversized root_path field is what refuses.
+    const ParsedJournalFile at_cap = parse_journal_file(to_bytes(padded(pad_at_cap)), kRootKey);
+    REQUIRE_FALSE(at_cap.valid);
+    CHECK(at_cap.failure.kind == ParseFailureKind::CapExceeded);
+    CHECK_MESSAGE(at_cap.failure.detail.find("root_path") != std::string::npos,
+                  "the field cap is what refuses at the boundary: ", at_cap.failure.detail);
+
+    // Stored 8,193 (one past the cap): the record cap refuses first.
+    const ParsedJournalFile over_cap =
+        parse_journal_file(to_bytes(padded(pad_at_cap + 1)), kRootKey);
+    REQUIRE_FALSE(over_cap.valid);
+    CHECK(over_cap.failure.kind == ParseFailureKind::CapExceeded);
+    CHECK_MESSAGE(over_cap.failure.detail.find("8 KiB") != std::string::npos,
+                  "the record cap is what refuses past the boundary: ",
+                  over_cap.failure.detail);
+}
+
+TEST_CASE("T-14: an oversize unterminated tail is refused by the record cap") {
+    // A ratified writer never emits a record above the cap, so an oversize
+    // tail (terminated or not) is corruption: the file is invalid, not
+    // merely torn.
+    const std::string head = ser_first(JournalRecord{make_run_start(1, false)});
+    std::string image = head + std::string(journal_max_record_bytes, 'a');
+    const ParsedJournalFile p = parse_journal_file(to_bytes(image), kRootKey);
+    CHECK_FALSE(p.valid);
+    CHECK(p.failure.kind == ParseFailureKind::CapExceeded);
+
+    // The same ceiling governs anchor records (450 bytes, LF counted).
+    const ParsedAnchorFile a1 = parse_anchor_file(to_bytes(std::string(460, 'a')));
+    CHECK_FALSE(a1.valid);
+    CHECK(a1.failure.kind == ParseFailureKind::CapExceeded);
+    const ParsedAnchorFile a2 = parse_anchor_file(to_bytes(std::string(460, 'a') + "\n"));
+    CHECK_FALSE(a2.valid);
+    CHECK(a2.failure.kind == ParseFailureKind::CapExceeded);
+
+    // The boundary is inclusive: one byte under the cap the tail is merely
+    // torn (a garbage tail still fails record validation), never capped.
+    std::string under = head + std::string(journal_max_record_bytes - 1, 'a');
+    const ParsedJournalFile p_under = parse_journal_file(to_bytes(under), kRootKey);
+    REQUIRE(p_under.valid);
+    CHECK(p_under.tail == JournalTailKind::Torn);
+    const ParsedAnchorFile a0 = parse_anchor_file(to_bytes(std::string(449, 'a')));
+    REQUIRE(a0.valid);
+    CHECK(a0.tail == JournalTailKind::Torn);
 }
 
 // ---------------------------------------------------------------------------
@@ -640,7 +865,10 @@ TEST_CASE("T-14: oversize input is refused") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("T-10: non-canonical numbers, escapes and whitespace are rejected") {
-    const std::string line = ser(JournalRecord{make_result(2, 0)});
+    const std::string image = chain_image({JournalRecord{make_run_start(1, false)},
+                                           JournalRecord{make_intent(1, 0)},
+                                           JournalRecord{make_result(2, 0)}});
+    const std::size_t result_line = line_offset(image, 2);
 
     struct BadPatch {
         const char* from;
@@ -659,31 +887,228 @@ TEST_CASE("T-10: non-canonical numbers, escapes and whitespace are rejected") {
         {"\"v\":1", "\"v\" :1", "space inside object"},
     };
     for (const BadPatch& bad : patches) {
-        std::string patched = line;
-        REQUIRE_MESSAGE(replace_first(patched, bad.from, bad.to),
+        std::string patched = image;
+        REQUIRE_MESSAGE(patch_from(patched, result_line, bad.from, bad.to),
                         "target missing: ", bad.label);
         const ParsedJournalFile p = parse_journal_file(to_bytes(patched), kRootKey);
         CHECK_MESSAGE(!p.valid, "accepted non-canonical encoding: ", bad.label);
     }
 
-    // Uppercase hex in a hash field.
-    std::string upper = line;
+    // Uppercase hex in a hash field (record 0's prev): the hash reader
+    // refuses anything but lowercase hex. The first hex digit sits directly
+    // after the 8-byte needle; force it into an uppercase (rejected) form
+    // whatever digit it is (a-f uppercases, 0-9 becomes 'A').
+    std::string upper = image;
     const std::size_t prev_pos = upper.find("\"prev\":\"");
     REQUIRE(prev_pos != std::string::npos);
-    for (std::size_t i = prev_pos + 9; i < prev_pos + 9 + 64; ++i) {
-        if (upper[i] >= 'a' && upper[i] <= 'f') {
-            upper[i] = static_cast<char>(upper[i] - 'a' + 'A');
-            break;
-        }
-    }
-    CHECK_FALSE(parse_journal_file(to_bytes(upper), kRootKey).valid);
+    const char first = upper[prev_pos + 8];
+    upper[prev_pos + 8] =
+        (first >= 'a' && first <= 'f') ? static_cast<char>(first - 'a' + 'A') : 'A';
+    const ParsedJournalFile p_upper = parse_journal_file(to_bytes(upper), kRootKey);
+    CHECK_FALSE(p_upper.valid);
+    CHECK(p_upper.failure.kind == ParseFailureKind::NonCanonicalEncoding);
 }
 
 TEST_CASE("T-11: interior empty lines and CRLF framing are non-canonical") {
-    const std::string line = ser(JournalRecord{make_run_start(1, false)});
-    CHECK_FALSE(parse_journal_file(to_bytes(line + "\n"), kRootKey).valid);
+    const std::string line = ser_first(JournalRecord{make_run_start(1, false)});
+    const ParsedJournalFile empty_line =
+        parse_journal_file(to_bytes(line + "\n"), kRootKey);
+    CHECK_FALSE(empty_line.valid);
+    CHECK(empty_line.failure.kind == ParseFailureKind::NonCanonicalEncoding);
     std::string crlf = line.substr(0, line.size() - 1) + "\r\n";
-    CHECK_FALSE(parse_journal_file(to_bytes(crlf), kRootKey).valid);
+    const ParsedJournalFile crlf_file =
+        parse_journal_file(to_bytes(crlf), kRootKey);
+    CHECK_FALSE(crlf_file.valid);
+    CHECK(crlf_file.failure.kind == ParseFailureKind::NonCanonicalEncoding);
+}
+
+// ---------------------------------------------------------------------------
+// T-10/T-13: canonical member separators. The parser consumes exactly one
+// comma before every member after the first; every deviation is refused.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("T-10: missing, double, leading and trailing commas are rejected") {
+    const std::string image = chain_image({JournalRecord{make_run_start(1, false)},
+                                           JournalRecord{make_intent(1, 0)}});
+    const std::size_t intent_line = line_offset(image, 1);
+    const ParsedJournalFile control = parse_journal_file(to_bytes(image), kRootKey);
+    REQUIRE(control.valid);  // positive control
+
+    // Missing comma between two members of the INTENT line.
+    std::string missing = image;
+    REQUIRE_MESSAGE(patch_from(missing, intent_line,
+                               "\"type\":\"INTENT\",\"seq\"", "\"type\":\"INTENT\"\"seq\""),
+                    "missing-comma target missing");
+    const ParsedJournalFile p1 = parse_journal_file(to_bytes(missing), kRootKey);
+    CHECK_FALSE(p1.valid);
+    CHECK(p1.failure.kind == ParseFailureKind::NonCanonicalEncoding);
+
+    // Double comma.
+    std::string double_comma = image;
+    REQUIRE_MESSAGE(patch_from(double_comma, intent_line,
+                               "\"type\":\"INTENT\",\"seq\"", "\"type\":\"INTENT\",,\"seq\""),
+                    "double-comma target missing");
+    const ParsedJournalFile p2 = parse_journal_file(to_bytes(double_comma), kRootKey);
+    CHECK_FALSE(p2.valid);
+    CHECK(p2.failure.kind == ParseFailureKind::NonCanonicalEncoding);
+
+    // Leading comma after the opening brace (a comma before the first
+    // member is never canonical).
+    std::string leading = image;
+    REQUIRE(patch_from(leading, 0, "{\"v\":1", "{,\"v\":1"));
+    const ParsedJournalFile p3 = parse_journal_file(to_bytes(leading), kRootKey);
+    CHECK_FALSE(p3.valid);
+    CHECK(p3.failure.kind == ParseFailureKind::NonCanonicalEncoding);
+
+    // Trailing comma before the closing brace of the INTENT record.
+    std::string trailing = image;
+    REQUIRE(patch_from(trailing, intent_line, "\"}\n", ",\"}\n"));
+    const ParsedJournalFile p4 = parse_journal_file(to_bytes(trailing), kRootKey);
+    CHECK_FALSE(p4.valid);
+    CHECK(p4.failure.kind == ParseFailureKind::NonCanonicalEncoding);
+}
+
+TEST_CASE("T-13: optional acknowledgement - present, absent, lookahead restored") {
+    // Present: the pair serializes and parses.
+    const ParsedJournalFile with_ack =
+        parse_ok(ser_first(JournalRecord{make_run_start(2, true)}));
+    REQUIRE(with_ack.records.size() == 1);
+    CHECK(std::get<JournalRunStart>(with_ack.records[0]).has_ack);
+
+    // Absent: the failed lookahead for the optional member must leave the
+    // parser fully restored (offset, error, failure kind, member count), so
+    // the following prev/integrity members still parse.
+    const ParsedJournalFile without_ack =
+        parse_ok(ser_first(JournalRecord{make_run_start(2, false)}));
+    REQUIRE(without_ack.records.size() == 1);
+    CHECK_FALSE(std::get<JournalRunStart>(without_ack.records[0]).has_ack);
+}
+
+TEST_CASE("T-10: commas inside string values do not disturb member framing") {
+    JournalResult commas = make_result(2, 0, JournalOutcome::Moved, "a,b, c ,, \"d,e\"");
+    const ParsedJournalFile p =
+        parse_ok(chain_image({JournalRecord{make_run_start(1, false)},
+                              JournalRecord{make_intent(1, 0)},
+                              JournalRecord{commas}}));
+    REQUIRE(p.records.size() == 3);
+    CHECK(p.records[2] == JournalRecord{commas});
+}
+
+// ---------------------------------------------------------------------------
+// T-15: prev/integrity wire order, genesis and chain seeds, byte accounting.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("T-15: prev precedes integrity; genesis and chain seeds are exact") {
+    // Record 0: prev is the genesis seed of its own run/root_run_seq.
+    const std::string line0 = ser_first(JournalRecord{make_run_start(1, false)});
+    const JournalHashResult genesis = journal_genesis_prev(kRootKey, kRootRunSeq, kRun);
+    REQUIRE(genesis.ok);
+    const std::size_t prev_field = line0.find("\"prev\":\"");
+    REQUIRE(prev_field != std::string::npos);
+    CHECK(line0.compare(prev_field + 8, 64, genesis.hex) == 0);
+
+    // Wire order: "prev" is immediately followed by its 64-hex value, the
+    // closing quote and the "integrity" member; the line ends `"}\n`.
+    const std::string tail = line0.substr(prev_field);
+    const std::string expected_prefix =
+        "\"prev\":\"" + genesis.hex + "\",\"integrity\":\"";
+    REQUIRE(tail.size() > expected_prefix.size() + 64 + 3);
+    CHECK(tail.compare(0, expected_prefix.size(), expected_prefix) == 0);
+    CHECK(tail.compare(tail.size() - 3, 3, "\"}\n") == 0);
+
+    // Record 1: prev is SHA-256 over record 0's full canonical bytes
+    // (integrity included, LF excluded).
+    const std::string line1 =
+        serialize_journal_record(JournalRecord{make_intent(1, 0)}, prev_of(line0))
+            .canonical;
+    const std::size_t prev1 = line1.find("\"prev\":\"");
+    REQUIRE(prev1 != std::string::npos);
+    CHECK(line1.compare(prev1 + 8, 64, prev_of(line0)) == 0);
+    CHECK(parse_ok(line0 + line1).records.size() == 2);
+}
+
+TEST_CASE("T-15: integrity covers prev - tampering with prev is detected") {
+    const std::string image = chain_image({JournalRecord{make_run_start(1, false)},
+                                           JournalRecord{make_intent(1, 0)}});
+    const ParsedJournalFile good = parse_journal_file(to_bytes(image), kRootKey);
+    REQUIRE(good.valid);  // positive control
+
+    // Replace record 1's prev value with different (still canonical) hex:
+    // record 1's integrity hash was computed over a body that includes
+    // prev, so the tampering must surface as a chain break.
+    std::string tampered = image;
+    const std::size_t first_lf = tampered.find('\n');
+    REQUIRE(first_lf != std::string::npos);
+    const std::size_t prev2 = tampered.find("\"prev\":\"", first_lf);
+    REQUIRE(prev2 != std::string::npos);
+    tampered.replace(prev2 + 8, 64, hex64('a'));
+    const ParsedJournalFile p1 = parse_journal_file(to_bytes(tampered), kRootKey);
+    CHECK_FALSE(p1.valid);
+    CHECK(p1.failure.kind == ParseFailureKind::ChainBreak);
+}
+
+TEST_CASE("T-15: a record without prev, or with prev out of order, is rejected") {
+    const std::string line0 = ser_first(JournalRecord{make_run_start(1, false)});
+
+    // Missing prev: erase the member (9 key/quote bytes + 64 hex + 1 quote)
+    // from an otherwise valid record 0.
+    std::string missing = line0;
+    const std::size_t prev_field = missing.find(",\"prev\":\"");
+    REQUIRE(prev_field != std::string::npos);
+    REQUIRE(missing.compare(prev_field + 9 + 64, 1, "\"") == 0);
+    missing.erase(prev_field, 74);
+    const ParsedJournalFile p1 = parse_journal_file(to_bytes(missing), kRootKey);
+    CHECK_FALSE(p1.valid);
+    CHECK(p1.failure.kind == ParseFailureKind::NonCanonicalEncoding);
+
+    // Reordered prev/integrity: `prev` must be the second-to-last member.
+    std::string swapped = line0;
+    const std::size_t pf = swapped.find(",\"prev\":\"");
+    REQUIRE(pf != std::string::npos);
+    const std::size_t inf = swapped.find(",\"integrity\":\"", pf);
+    REQUIRE(inf != std::string::npos);
+    const std::string prev_member = swapped.substr(pf, 74);
+    const std::string integrity_member = swapped.substr(inf, 79);
+    swapped.replace(pf, (inf - pf) + 79, integrity_member + prev_member);
+    const ParsedJournalFile p2 = parse_journal_file(to_bytes(swapped), kRootKey);
+    CHECK_FALSE(p2.valid);
+    CHECK(p2.failure.kind == ParseFailureKind::NonCanonicalEncoding);
+}
+
+TEST_CASE("T-15: the prev member is exactly 74 bytes, before integrity") {
+    // Byte-level pin: `,"prev":"` (9) + 64 hex + `"` (1) = 74 bytes, inserted
+    // immediately before `,"integrity":"`. Anchor records carry no prev.
+    const std::string line = ser_first(JournalRecord{make_run_start(2, false)});
+    const std::size_t prev_at = line.find(",\"prev\":\"");
+    const std::size_t integrity_at = line.find(",\"integrity\":\"");
+    REQUIRE(prev_at != std::string::npos);
+    REQUIRE(integrity_at != std::string::npos);
+    CHECK(integrity_at - prev_at == 74);
+
+    // Full-line byte pin derived field-by-field from the canonical schema
+    // for make_run_start(2, false); volume/root_path JSON escaping counted
+    // (4 and 3 backslashes respectively, each serialized as `\\`).
+    const std::string run = kRun;
+    const std::string volume = kVolume;       // 49 content bytes
+    const std::string root_path = kRootPath;  // 21 content bytes
+    const std::size_t expected =
+        6                                    // {"v":1
+        + 8 + run.size() + 1                 // ,"run":"<run>"
+        + 16                                 // ,"dir":"forward"
+        + 19                                 // ,"type":"RUN-START"
+        + 7 + 1                              // ,"seq":0
+        + 16 + 1                             // ,"root_run_seq":7
+        + 22 + 1                             // ,"planned_move_count":2
+        + 12 + 73 + 1                        // ,"lock_id":"<73>"
+        + 12 + 73 + 1                        // ,"root_id":"<73>"
+        + 14 + 73 + 1                        // ,"anchor_id":"<73>"
+        + 11 + volume.size() + 4 + 1         // ,"volume":"<volume + 4 escapes>"
+        + 14 + root_path.size() + 3 + 1      // ,"root_path":"<path + 3 escapes>"
+        + 9 + 64 + 1                         // ,"prev":"<64>"
+        + 14 + 64 + 1                        // ,"integrity":"<64>"
+        + 1 + 1;                             // '}' and the terminating LF
+    CHECK(line.size() == expected);
+    CHECK(line.back() == '\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -845,9 +1270,23 @@ TEST_CASE("T-15: maximal records against the ratified per-record ceilings (docs 
     CHECK_MESSAGE(run_end <= 400, "RUN-END maximal ", run_end, " > 400");
     CHECK_MESSAGE(undo_start <= 700, "UNDO-START maximal ", undo_start, " > 700");
     CHECK_MESSAGE(anchor_size <= 450, "anchor maximal ", anchor_size, " > 450");
-    // The document's UNDO-INTENT/UNDO-RESULT/UNDO-END ceilings are not
-    // satisfiable under the canonical encoding (reported as errata in the
-    // 7.1b report); the 8 KiB cap is the binding constraint for them.
+
+    // The document's UNDO-INTENT/UNDO-RESULT/UNDO-END (and, at the 20-digit
+    // root_run_seq ceiling, RUN-END) per-record estimates are not satisfied
+    // by the corrected canonical encoding: true schema maxima are 2,326 /
+    // 2,881 / 537 / 411 bytes incl. LF. Hosted run 7 measured the fixtures
+    // at 2,250 / 2,805 / 402 / 295 before this remediation; the corrected
+    // encoding drops the spurious move_id member from undo records (-19 at
+    // the 8-digit maximum) and adds the 74-byte prev member, plus maximal
+    // run/root_run_seq width deltas. The 8 KiB record cap above is the
+    // binding runtime constraint; the docs section 12 table is corrected in
+    // the documentation-only pass (no runtime restriction is derived from
+    // the estimates).
+    // Byte pin: hosted run #7 measured this UNDO-END fixture at 402 bytes
+    // before `prev` was serialized; the fix adds exactly 74.
+    CHECK(undo_end == 476);
+    CHECK(ser(JournalRecord{make_undo_end(journal_seq_max, journal_seq_max)}).back() == '\n');
+
     MESSAGE("measured maximal sizes: RUN-START=", run_start, " INTENT=", intent_size,
             " RESULT=", result_size, " RUN-END=", run_end, " UNDO-START=", undo_start,
             " UNDO-INTENT=", undo_intent_size, " UNDO-RESULT=", undo_result_size,
@@ -859,6 +1298,16 @@ TEST_CASE("T-50 (unit basis): exact reserves at the 1,500-move bound fit the fil
     REQUIRE_MESSAGE(fwd.ok, "forward reserve failed: ", fwd.error);
     const CapacityEstimate seg = segment_reserve_bytes(make_undo_start(1), journal_move_limit);
     REQUIRE_MESSAGE(seg.ok, "segment reserve failed: ", seg.error);
+
+    // Exact-byte pin for a one-candidate attempt (regression pin for the
+    // moved-from reserve fix, which previously read moved-from strings):
+    // UNDO-START 486 + maximal UNDO-INTENT 2,265 + maximal UNDO-RESULT 2,820
+    // + UNDO-END 455; every record includes its 74-byte prev member and the
+    // terminating LF, with maximal identities/names/timestamps/detail. Undo
+    // records carry no move_id member (docs section 5).
+    const CapacityEstimate small = segment_reserve_bytes(make_undo_start(1), 1);
+    REQUIRE_MESSAGE(small.ok, "small segment reserve failed: ", small.error);
+    CHECK(small.bytes == 6026);
     const CapacityEstimate anc = anchor_reserve_bytes(journal_move_limit);
     REQUIRE_MESSAGE(anc.ok, "anchor reserve failed: ", anc.error);
 
