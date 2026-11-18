@@ -129,14 +129,37 @@ NativeResult write_storage_file(HANDLE handle, const unsigned char* bytes,
 NativeResult storage_file_size(HANDLE handle, long long& out_bytes);
 
 // ---------------------------------------------------------------------------
-// ACL validation [G4] - validation only, never construction.
+// ACL validation [G4, ratified Decision A] - validation only, never
+// construction. Operability validation for the current user (Decision D);
+// the ratified policy additionally refuses absent and NULL DACLs outright.
 // ---------------------------------------------------------------------------
+
+// DACL presence classification of a security descriptor (ratified Decision
+// A). Inspection uses GetSecurityDescriptorDacl: an inspection failure fails
+// closed; when NO DACL is present the pointer is never inspected; a
+// present-but-null DACL is a NULL DACL; a present ACL - including an EMPTY
+// one (zero ACEs), which AccessCheck itself denies - is returned for the
+// caller's access evaluation.
+enum class DaclPresence { Present, Absent, NullDacl };
+
+struct DaclInspection {
+    bool ok = false;                   // false: the descriptor could not be inspected
+    NativeFailure failure = NativeFailure::Other;
+    std::string error;
+    unsigned long native_code = 0;
+    DaclPresence presence = DaclPresence::Absent;  // meaningful when ok
+    PACL dacl = nullptr;               // valid only when presence == Present
+};
+DaclInspection inspect_dacl_presence(PSECURITY_DESCRIPTOR descriptor);
 
 // AccessChecks the current user's token against the opened object's DACL:
 // granted when the token holds every access bit of `desired_generic_access`
-// (generic access mapped through the standard file mapping). A missing DACL
-// grants everything and reports granted - the design validates operability,
-// not hardening. Never modifies any ACL.
+// (generic access mapped through the standard file mapping). Ratified
+// Decision A: an ABSENT DACL and a NULL DACL refuse outright (either would
+// otherwise grant everyone); an EMPTY DACL (present, zero ACEs) is denied by
+// AccessCheck itself. The validation is operability validation for the
+// current user (Decision D), not principal-level ACL enforcement. Never
+// modifies any ACL.
 struct AclValidationResult {
     bool ok = false;                   // false: the validation could not run
     NativeFailure failure = NativeFailure::Other;

@@ -96,6 +96,84 @@ std::string leaf_bytes(const StorageRoot& root, const std::string& name) {
     return contents;
 }
 
+// RAII restoration of a captured DACL (test fixtures). The constructor
+// captures the target's current DACL and its protection/inheritance state;
+// the destructor restores BOTH - the DACL bytes and whether the original
+// descriptor protected the DACL from inheritance - so the fixture is left
+// exactly as found. Restoration runs on every path, including a mid-case
+// assertion abort; the destructor never throws, and restoration failures
+// are reported on stderr (never silently swallowed).
+class ProtectedDaclGuard {
+public:
+    explicit ProtectedDaclGuard(const std::filesystem::path& target)
+        : target_(target) {
+        HANDLE handle = ::CreateFileW(target_.c_str(), READ_CONTROL,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      nullptr, OPEN_EXISTING,
+                                      FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            std::fprintf(stderr, "DACL GUARD: capture open failed (error %lu): %ls\n",
+                         static_cast<unsigned long>(::GetLastError()),
+                         target_.c_str());
+            return;
+        }
+        const BOOL captured =
+            ::GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                              nullptr, nullptr, &original_dacl_, nullptr,
+                              &descriptor_) == ERROR_SUCCESS;
+        if (captured && descriptor_ != nullptr) {
+            // Preserve the original protection/inheritance state: the
+            // restoration re-applies the protected flag only when the
+            // original descriptor carried it.
+            WORD control = 0;
+            DWORD revision = 0;
+            if (::GetSecurityDescriptorControl(descriptor_, &control,
+                                               &revision) &&
+                (control & SE_DACL_PROTECTED) != 0) {
+                original_protected_ = true;
+            }
+            captured_ = true;
+        } else {
+            std::fprintf(stderr, "DACL GUARD: capture failed (error %lu)\n",
+                         static_cast<unsigned long>(::GetLastError()));
+        }
+        ::CloseHandle(handle);
+    }
+
+    ~ProtectedDaclGuard() {
+        if (!captured_) {
+            if (descriptor_ != nullptr) {
+                ::LocalFree(descriptor_);
+            }
+            return;
+        }
+        const unsigned long flags =
+            DACL_SECURITY_INFORMATION |
+            (original_protected_ ? PROTECTED_DACL_SECURITY_INFORMATION : 0UL);
+        const BOOL restored = ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(target_.c_str()), SE_FILE_OBJECT, flags, nullptr,
+            nullptr, original_dacl_, nullptr);
+        if (restored != ERROR_SUCCESS) {
+            std::fprintf(stderr, "DACL GUARD: restore failed (error %lu): %ls\n",
+                         static_cast<unsigned long>(::GetLastError()),
+                         target_.c_str());
+        }
+        ::LocalFree(descriptor_);
+    }
+
+    ProtectedDaclGuard(const ProtectedDaclGuard&) = delete;
+    ProtectedDaclGuard& operator=(const ProtectedDaclGuard&) = delete;
+
+    bool captured() const { return captured_; }
+
+private:
+    std::filesystem::path target_;
+    bool captured_ = false;
+    bool original_protected_ = false;
+    PACL original_dacl_ = nullptr;
+    PSECURITY_DESCRIPTOR descriptor_ = nullptr;
+};
+
 // ---------------------------------------------------------------------------
 // Cross-process lock-test support (hosted-only).
 // ---------------------------------------------------------------------------
@@ -557,22 +635,10 @@ TEST_CASE("T-29: a journals directory ACL without write access refuses") {
     REQUIRE(b.storage.ok);
     const auto journals_path = b.journals_path().wstring();
 
-    // Capture the current DACL so the fixture can restore it afterwards.
-    HANDLE handle = ::CreateFileW(journals_path.c_str(), READ_CONTROL,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                  OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
-                                  nullptr);
-    REQUIRE(handle != INVALID_HANDLE_VALUE);
-    PSECURITY_DESCRIPTOR original = nullptr;
-    PACL original_dacl = nullptr;
-    const BOOL captured =
-        ::GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-                          nullptr, nullptr, &original_dacl, nullptr,
-                          &original) == ERROR_SUCCESS;
-    ::CloseHandle(handle);
-    REQUIRE(captured);
-    const auto descriptor_free = std::unique_ptr<void, void (*)(void*)>(
-        original, [](void* p) { ::LocalFree(p); });
+    // The guard restores the original DACL and its protection state on
+    // every path (RAII), including a mid-case assertion abort.
+    ProtectedDaclGuard guard(b.journals_path());
+    REQUIRE(guard.captured());
 
     // Build a minimal DACL granting the current user read-only access.
     SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
@@ -620,17 +686,119 @@ TEST_CASE("T-29: a journals directory ACL without write access refuses") {
     CHECK((refused.failure == StorageFailure::AccessDenied ||
            refused.failure == StorageFailure::AclValidationFailed));
 
-    // Restore the original DACL (protected as well, so the restored state is
-    // exactly the captured explicit DACL) so the fixture teardown can remove
-    // the tree.
-    const BOOL restored = ::SetNamedSecurityInfoW(
-        const_cast<LPWSTR>(journals_path.c_str()), SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-        nullptr, nullptr, original_dacl, nullptr);
-    const DWORD restored_error = ::GetLastError();
-    REQUIRE_MESSAGE(restored == ERROR_SUCCESS,
-                    "SetNamedSecurityInfoW(restore DACL) failed with "
-                        << "Win32 error " << restored_error);
+    // Restoration is the guard's destructor: RAII on every path (including
+    // a mid-case assertion abort), with failures reported on stderr.
+}
+
+// ---------------------------------------------------------------------------
+// Ratified Decision A: absent and NULL DACLs refuse outright; an empty DACL
+// (present, zero ACEs) is denied by AccessCheck itself.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Decision A: absent and NULL DACLs refuse; empty DACL denies through AccessCheck") {
+    Bootstrapped b("st-dacl-policy"); bootstrap_fresh(b);
+    REQUIRE(b.storage.ok);
+    const auto journals_path = b.journals_path().wstring();
+
+    // (a) NULL DACL on the journals directory. The component OPEN succeeds
+    // (a NULL DACL grants everyone), so the refusal is exercised at the [G4]
+    // ACL validator itself - the AclValidationFailed path.
+    {
+        ProtectedDaclGuard guard(b.journals_path());
+        REQUIRE(guard.captured());
+        const BOOL applied = ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(journals_path.c_str()), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, nullptr, nullptr);
+        const DWORD applied_error = ::GetLastError();
+        REQUIRE_MESSAGE(applied == ERROR_SUCCESS,
+                        "SetNamedSecurityInfoW(NULL DACL) failed with "
+                            << "Win32 error " << applied_error);
+        const auto refused = open_storage_root(b.base.u8(), b.root.root);
+        CHECK_FALSE(refused.ok);
+        CHECK(refused.failure == StorageFailure::AclValidationFailed);
+    }
+    // Restoration sanity: with the original DACL back, the bootstrap
+    // succeeds again.
+    const auto restored_ok = open_storage_root(b.base.u8(), b.root.root);
+    INFO("restored bootstrap failure="
+         << static_cast<int>(restored_ok.failure)
+         << " native_code=" << restored_ok.native_code
+         << " error=" << restored_ok.error);
+    CHECK(restored_ok.ok);
+
+    // (b) The absent-DACL variant at the descriptor level. A genuinely
+    // absent DACL cannot be written to a real NTFS object through supported
+    // APIs (SetNamedSecurityInfoW always sets SE_DACL_PRESENT), so this
+    // variant exercises the EXACT classification the validator uses on
+    // synthetic security descriptors. DOCUMENTED LIMITATION.
+    {
+        SECURITY_DESCRIPTOR sd{};
+        REQUIRE(::InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION));
+
+        // Absent: no DACL present - the pointer is never inspected.
+        REQUIRE(::SetSecurityDescriptorDacl(&sd, FALSE, nullptr, FALSE));
+        const auto absent = platform::inspect_dacl_presence(&sd);
+        REQUIRE(absent.ok);
+        CHECK(absent.presence == platform::DaclPresence::Absent);
+
+        // NULL DACL: present, null pointer - refused.
+        REQUIRE(::SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE));
+        const auto null_dacl = platform::inspect_dacl_presence(&sd);
+        REQUIRE(null_dacl.ok);
+        CHECK(null_dacl.presence == platform::DaclPresence::NullDacl);
+
+        // Empty DACL: present, zero ACEs - classified Present; the denial
+        // happens through AccessCheck (variant (c)).
+        std::vector<unsigned char> acl_buffer(sizeof(ACL) + 64, 0);
+        auto* empty_acl = reinterpret_cast<PACL>(acl_buffer.data());
+        REQUIRE(::InitializeAcl(empty_acl, static_cast<DWORD>(acl_buffer.size()),
+                                ACL_REVISION));
+        REQUIRE(::SetSecurityDescriptorDacl(&sd, TRUE, empty_acl, FALSE));
+        const auto present = platform::inspect_dacl_presence(&sd);
+        REQUIRE(present.ok);
+        CHECK(present.presence == platform::DaclPresence::Present);
+        CHECK(present.dacl == empty_acl);
+    }
+
+    // (c) Empty DACL denial through the ACTUAL AccessCheck path: the
+    // journals directory handle is pre-opened with READ_CONTROL while the
+    // ACL is still permissive, THEN the empty DACL is applied - the opened
+    // handle retains its access, so the validator below evaluates the real
+    // AccessCheck against the empty DACL. (An open AFTER applying the empty
+    // DACL would fail AccessDenied at the component open and would NOT
+    // exercise AccessCheck.)
+    {
+        ProtectedDaclGuard guard(b.journals_path());
+        REQUIRE(guard.captured());
+        HANDLE preopened = ::CreateFileW(
+            journals_path.c_str(), READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        REQUIRE(preopened != INVALID_HANDLE_VALUE);
+
+        std::vector<unsigned char> acl_buffer(sizeof(ACL) + 64, 0);
+        auto* empty_acl = reinterpret_cast<PACL>(acl_buffer.data());
+        REQUIRE(::InitializeAcl(empty_acl, static_cast<DWORD>(acl_buffer.size()),
+                                ACL_REVISION));
+        const BOOL applied = ::SetNamedSecurityInfoW(
+            const_cast<LPWSTR>(journals_path.c_str()), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, empty_acl, nullptr);
+        const DWORD applied_error = ::GetLastError();
+        REQUIRE_MESSAGE(applied == ERROR_SUCCESS,
+                        "SetNamedSecurityInfoW(empty DACL) failed with "
+                            << "Win32 error " << applied_error);
+
+        const auto denied = platform::validate_current_user_access(
+            preopened, FILE_GENERIC_READ | FILE_GENERIC_WRITE);
+        ::CloseHandle(preopened);
+        INFO("validator failure=" << static_cast<int>(denied.failure)
+                                  << " native_code=" << denied.native_code
+                                  << " error=" << denied.error);
+        REQUIRE(denied.ok);
+        CHECK_FALSE(denied.granted);
+    }
 }
 
 // ---------------------------------------------------------------------------

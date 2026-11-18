@@ -440,8 +440,40 @@ NativeResult storage_file_size(HANDLE handle, long long& out_bytes) {
 }
 
 // ---------------------------------------------------------------------------
-// ACL validation [G4].
+// ACL validation [G4, ratified Decision A].
 // ---------------------------------------------------------------------------
+
+DaclInspection inspect_dacl_presence(PSECURITY_DESCRIPTOR descriptor) {
+    DaclInspection out;
+    if (descriptor == nullptr) {
+        out.failure = NativeFailure::Other;
+        out.error = "DACL inspection requires a security descriptor";
+        return out;
+    }
+    BOOL present = FALSE;
+    PACL dacl = nullptr;
+    BOOL defaulted = FALSE;
+    if (!::GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted)) {
+        out.failure = NativeFailure::Other;
+        out.native_code = ::GetLastError();
+        out.error = win32_message("GetSecurityDescriptorDacl", out.native_code);
+        return out;
+    }
+    out.ok = true;
+    // When NO DACL is present the pointer is never inspected: its value is
+    // meaningless for an absent DACL (ratified Decision A classification).
+    if (!present) {
+        out.presence = DaclPresence::Absent;
+        return out;
+    }
+    if (dacl == nullptr) {
+        out.presence = DaclPresence::NullDacl;
+        return out;
+    }
+    out.presence = DaclPresence::Present;
+    out.dacl = dacl;
+    return out;
+}
 
 AclValidationResult validate_current_user_access(HANDLE handle,
                                                  unsigned long generic_access) {
@@ -455,22 +487,43 @@ AclValidationResult validate_current_user_access(HANDLE handle,
 
     // The current process token: AccessCheck evaluates the token's user AND
     // group SIDs against the DACL, so no separate SID extraction is needed.
+    // AccessCheck requires an IMPERSONATION-level token (it fails with
+    // ERROR_BAD_IMPERSONATION_LEVEL against a primary token), so the
+    // process's primary token is duplicated to a Query-only impersonation
+    // token - the duplication grants no privileges beyond the source token.
     HANDLE raw_token = nullptr;
-    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &raw_token)) {
+    if (!::OpenProcessToken(::GetCurrentProcess(),
+                            TOKEN_DUPLICATE | TOKEN_QUERY, &raw_token)) {
         out.failure = NativeFailure::Other;
         out.native_code = ::GetLastError();
         out.error = win32_message("OpenProcessToken", out.native_code);
         return out;
     }
-    unique_handle token{raw_token};
+    unique_handle process_token{raw_token};
 
-    // The opened object's DACL. Validation only - the descriptor is freed,
-    // never written back.
+    HANDLE raw_duplicate = nullptr;
+    if (!::DuplicateTokenEx(process_token.get(), TOKEN_QUERY, nullptr,
+                            SecurityImpersonation, TokenImpersonation,
+                            &raw_duplicate)) {
+        out.failure = NativeFailure::Other;
+        out.native_code = ::GetLastError();
+        out.error = win32_message("DuplicateTokenEx", out.native_code);
+        return out;
+    }
+    unique_handle token{raw_duplicate};
+
+    // The opened object's security descriptor (owner AND group information
+    // included: AccessCheck evaluates owner-rights ACEs and rejects a
+    // group-less descriptor with ERROR_INVALID_SECURITY_DESCR - runtime
+    // evidence 2026-11-18: after a SetNamedSecurityInfoW DACL write, the
+    // descriptor returned without GROUP_SECURITY_INFORMATION lacks the group
+    // and every AccessCheck on it fails). Validation only - the descriptor
+    // is freed, never written back.
     PSECURITY_DESCRIPTOR descriptor = nullptr;
-    PACL dacl = nullptr;
     if (::GetSecurityInfo(handle, SE_FILE_OBJECT,
-                          DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
-                          nullptr, nullptr, &dacl, nullptr,
+                          DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION |
+                              GROUP_SECURITY_INFORMATION,
+                          nullptr, nullptr, nullptr, nullptr,
                           &descriptor) != ERROR_SUCCESS ||
         descriptor == nullptr) {
         out.failure = NativeFailure::Other;
@@ -480,6 +533,80 @@ AclValidationResult validate_current_user_access(HANDLE handle,
     }
     const auto descriptor_free = std::unique_ptr<void, void (*)(void*)>(
         descriptor, [](void* p) { ::LocalFree(p); });
+
+    // Ratified Decision A: classify DACL presence EXACTLY before any access
+    // evaluation. An inspection failure fails closed; when no DACL is
+    // present the pointer is never inspected. Absent and NULL DACLs refuse
+    // outright (either would otherwise grant everyone); an EMPTY DACL
+    // (present, zero ACEs) falls through to AccessCheck, which denies it.
+    const auto inspection = inspect_dacl_presence(descriptor);
+    if (!inspection.ok) {
+        out.failure = inspection.failure;
+        out.native_code = inspection.native_code;
+        out.error = "security descriptor DACL inspection failed: " + inspection.error;
+        return out;
+    }
+    if (inspection.presence == DaclPresence::Absent) {
+        out.ok = true;
+        out.granted = false;
+        out.error = "the security descriptor has NO DACL (absent DACL), which "
+                    "cannot be validated; refused per ratified Decision A";
+        return out;
+    }
+    if (inspection.presence == DaclPresence::NullDacl) {
+        out.ok = true;
+        out.granted = false;
+        out.error = "the security descriptor has a NULL DACL, which grants "
+                    "everyone; refused per ratified Decision A";
+        return out;
+    }
+
+    // AccessCheck rejects a descriptor whose control word carries
+    // SE_DACL_AUTO_INHERITED with ERROR_INVALID_SECURITY_DESCR even when the
+    // descriptor is structurally valid (runtime evidence 2026-11-18: DACLs
+    // written through SetNamedSecurityInfoW carry the hint, and
+    // SetSecurityDescriptorControl cannot clear that specific bit - it
+    // manages SE_DACL_PROTECTED and SE_DACL_AUTO_INHERIT_REQ only). The
+    // validator therefore evaluates the SAME owner/group/DACL content
+    // rebuilt into a fresh ABSOLUTE working descriptor: the hint never
+    // enters the copy, and the evaluated access inputs are identical. This
+    // is a private copy - the object itself is never touched.
+    SECURITY_DESCRIPTOR working{};
+    if (!::InitializeSecurityDescriptor(&working, SECURITY_DESCRIPTOR_REVISION)) {
+        out.failure = NativeFailure::Other;
+        out.native_code = ::GetLastError();
+        out.error = win32_message("InitializeSecurityDescriptor", out.native_code);
+        return out;
+    }
+    BOOL owner_defaulted = FALSE;
+    PSID owner = nullptr;
+    if (!::GetSecurityDescriptorOwner(descriptor, &owner, &owner_defaulted) ||
+        !::SetSecurityDescriptorOwner(&working, owner, owner_defaulted)) {
+        out.failure = NativeFailure::Other;
+        out.native_code = ::GetLastError();
+        out.error = win32_message("security descriptor owner transfer", out.native_code);
+        return out;
+    }
+    BOOL group_defaulted = FALSE;
+    PSID group = nullptr;
+    if (!::GetSecurityDescriptorGroup(descriptor, &group, &group_defaulted) ||
+        !::SetSecurityDescriptorGroup(&working, group, group_defaulted)) {
+        out.failure = NativeFailure::Other;
+        out.native_code = ::GetLastError();
+        out.error = win32_message("security descriptor group transfer", out.native_code);
+        return out;
+    }
+    BOOL dacl_present = FALSE;
+    BOOL dacl_defaulted = FALSE;
+    PACL dacl = nullptr;
+    if (!::GetSecurityDescriptorDacl(descriptor, &dacl_present, &dacl,
+                                     &dacl_defaulted) ||
+        !::SetSecurityDescriptorDacl(&working, TRUE, dacl, dacl_defaulted)) {
+        out.failure = NativeFailure::Other;
+        out.native_code = ::GetLastError();
+        out.error = win32_message("security descriptor DACL transfer", out.native_code);
+        return out;
+    }
 
     // Generic -> specific mapping through the standard file mapping.
     GENERIC_MAPPING mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -491,7 +618,7 @@ AclValidationResult validate_current_user_access(HANDLE handle,
     BOOL access_status = FALSE;
     PRIVILEGE_SET privileges{};
     DWORD privileges_size = sizeof(privileges);
-    const BOOL check = ::AccessCheck(descriptor, token.get(), desired, &mapping,
+    const BOOL check = ::AccessCheck(&working, token.get(), desired, &mapping,
                                      &privileges, &privileges_size, &granted,
                                      &access_status);
     if (!check) {
