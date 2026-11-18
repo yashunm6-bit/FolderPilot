@@ -601,37 +601,40 @@ SAC-off window grantable for 7.5.
 Per-root directory `<root-key>/` contains exactly: `mutation.lock`,
 `journal-<R:020d>.jsonl`, `anchor-<R:020d>.jsonl`, `undo-<R:020d>-<A:020d>.jsonl`
 — `R` = `root_run_seq`, `A` = `undo_attempt_seq`, both zero-padded 20-digit
-decimal (lexicographic order ≡ numeric order). `run` = `run-<R>` (≤ 25 B ≤ 34
+decimal (lexicographic order ≡ numeric order). `run` = `run-<R>` (24 B ≤ 34
 cap). `root_id` = the 64-hex root key (≤ 73 cap). One anchor per forward
 journal. Segments unanchored [G9].
 
-**Case-sensitivity policy [ADDENDUM]:** storage directories are created by
-FolderPilot with default NTFS semantics (case-insensitive); FolderPilot never
-enables per-directory case sensitivity. `FILE_CREATE`/`FILE_OPEN_IF` opens are
-case-insensitive, so a case-variant of a recognized name collides and cannot
-silently create a second file. Any entry whose name does not canonicalize to a
-recognized pattern (in either sensitivity regime) is an **unrecognized entry ⇒
-refuse new mutation** (fail closed). `.`/`..` enumeration pseudo-entries are
-skipped (quota parity) and never treated as unrecognized. Case-variant or
-duplicate sequence identities, malformed recognized-looking names
-(`journal-12a3.jsonl`, `journal-.jsonl`, `anchor-x.jsonl`), and files that
-cannot be safely classified are all unrecognized ⇒ refuse; **never choose
-between conflicting journals or anchors**.
+**Case-sensitivity policy [ADDENDUM; FILE_CREATE/FILE_OPEN_IF case-insensitive
+matching via `OBJ_CASE_INSENSITIVE` — W32-DOC + SRC: platform/native.cpp]:**
+storage directories are created by FolderPilot with default NTFS semantics
+(case-insensitive); FolderPilot never enables per-directory case sensitivity.
+`FILE_CREATE`/`FILE_OPEN_IF` opens are case-insensitive, so a case-variant of
+a recognized name collides and cannot silently create a second file. Any
+entry whose name does not canonicalize to a recognized pattern (in either
+sensitivity regime) is an **unrecognized entry ⇒ refuse new mutation** (fail
+closed). `.`/`..` enumeration pseudo-entries are skipped (quota parity) and
+never treated as unrecognized. Case-variant or duplicate sequence identities,
+malformed recognized-looking names (`journal-12a3.jsonl`, `journal-.jsonl`,
+`anchor-x.jsonl`), and files that cannot be safely classified are all
+unrecognized ⇒ refuse; **never choose between conflicting journals or
+anchors**.
 
 #### 20.2 Sequence allocation and storage classification [RATIFIED]
 
 Under the mutation lock: enumerate `<root-key>`; classify every entry.
 `root_run_seq` = max(recognized `journal-`/`undo-` first component) + 1.
-Sequence gaps are legal evidence (abandoned-init consumed sequences per §4/§14)
-and never reused. Overflow beyond the 20-digit field cap ⇒ refuse new runs.
-Corrupt files classify per §4.1/§6.3 — corrupt newest chain ⇒ forward blocked
-(exit 2), undo per §9. Incomplete initialization (journal without anchor,
-anchor without journal, zero-record journal) classifies per §4/§6.3; a new run
-always allocates the **next** sequence. Journal `FILE_CREATE` success followed
-by anchor `FILE_CREATE` failure ⇒ the run fails, the sequence is consumed
-(abandoned-init on restart — safe, disclosed). Failed `FILE_CREATE` (collision)
-⇒ refuse. **If the storage directory cannot be classified safely, refuse new
-mutation.**
+Sequence gaps are legal evidence (abandoned-init consumed sequences per
+§4/R14/§6.3) and never reused. Overflow beyond the 20-digit field cap ⇒
+refuse new runs. Corrupt files classify per §4.1/§6.3 — corrupt newest chain
+⇒ forward blocked (exit 2), undo per §9. Incomplete initialization (journal
+without anchor, anchor without journal, zero-record journal) classifies per
+§4/§6.3; a new run always allocates the **next** sequence. Journal
+`FILE_CREATE` success followed by anchor `FILE_CREATE` failure ⇒ the run
+fails, the sequence is consumed (abandoned-init on restart — safe, disclosed).
+Failed `FILE_CREATE` (collision) ⇒ refuse. `undo_attempt_seq` allocation per
+§6.2 lands with undo execution (7.3). **If the storage directory cannot be
+classified safely, refuse new mutation.**
 
 #### 20.3 Schemas [RATIFIED §5 unchanged]
 
@@ -644,28 +647,34 @@ file's identity digest; `root_id` = root_key; `anchor_id`/`journal_id` per
 #### 20.4 Identity conventions [RATIFIED]
 
 `E`/`L` are identity **encoding formats**, not cryptographic domain
-separation. Digests (`lock_id`, `journal_id`, `anchor_id`, `root_key`,
-`cat_id`, `file_id`) = lowercase-hex SHA-256 over the canonical
-representation-tagged identity material (`'E'|'L'` tag + little-endian
-fixed-width fields); purpose separation comes from what each digest is
-**recorded against** (the specific object's identity), pinned as convention
-**v1** (§16 G15); any future change requires a ratified v2. Raw identity
-material never appears in user-facing reports — only hex digests.
-`creation_time_filetime` = `FILE_BASIC_INFO.CreationTime` (distinct from
-`ChangeTime`), an **additional** fingerprint component — volume + file ID
-remain primary; precision 100 ns; `SetFileTime` mutability and NTFS tunneling
-limitations stand (§13). Identity is captured through the opened handle (never
-path-only) and revalidated before every mutation and during undo
-reconciliation; unknown forms, capture failure, or mismatch fail closed.
+separation. Digests (`lock_id`, `journal_id`, `anchor_id`, `cat_id`,
+`file_id`) = lowercase-hex SHA-256 over the canonical representation-tagged
+identity material (`'E'|'L'` tag + little-endian fixed-width fields);
+`root_key` keeps its ratified G12 formula — SHA-256 over UTF-8(volume GUID
+path) ‖ 0x00 ‖ the identity material. Purpose separation comes from what each
+digest is **recorded against** (the specific object's identity; digests are
+never compared cross-purpose — R11 continuity is per-field), pinned as
+convention **v1** ratified herein (§20); G15 is precedent for lock_id; any
+future change requires a ratified v2. Raw identity material never appears in
+user-facing reports — only hex digests. `creation_time_filetime` =
+`FILE_BASIC_INFO.CreationTime` (distinct from `ChangeTime`) is a **gating**
+fingerprint component (§13): volume + file ID + creation time must **all**
+match; id matches but ctime differs ⇒ presumed file-ID reuse ⇒ fail closed
+(T-17, T-52…54); size/mtime/content remain supplementary, non-gating;
+precision 100 ns; `SetFileTime` mutability and NTFS tunneling limitations
+stand. Identity is captured through the opened handle (never path-only) and
+revalidated before every mutation and during undo reconciliation; unknown
+forms, capture failure, or mismatch fail closed.
 
 #### 20.5 Capacity admission
 
 Before any file creation: `check_aggregate_quota(root,
 forward_reserve_bytes + anchor_reserve_bytes)` (exact worst-case recompute,
-existing helpers). Insufficient ⇒ refuse **before the first mutation**, exit 3
-per the ratified G3 mapping (operational storage failure), naming the storage
-path; no automatic deletion. The 16 MiB per-file limit is enforced on every
-append (existing).
+existing helpers, **under the mutation lock** per §12). Insufficient ⇒ refuse
+**before the first mutation**, exit 3 — capacity exhaustion is operational
+(environmental, user-remediable, no ambiguity), explicitly ratified here;
+T-50/T-80 gain exit-code assertions. The storage path is named; no automatic
+deletion. The 16 MiB per-file limit is enforced on every append (existing).
 
 #### 20.6 Ordering and crash-consistency matrix
 
@@ -674,25 +683,28 @@ next permitted operation. INTENT anchors before its rename; RESULT anchors
 before the next move; RUN-START anchors before the first INTENT; RUN-END is an
 unanchored terminal (flush only).
 
-| # | Window | Durable journal state | Durable anchor state | Possible filesystem state | Restart classification | Mutation allowed | Undo allowed | Owner intervention | Test |
+| # | Window | Durable journal state | Durable anchor state | Possible filesystem state | Restart classification | Mutation in interrupted run | Undo allowed | Owner intervention | Test |
 |---|---|---|---|---|---|---|---|---|---|
-| M0 | No journal created | none | none | none | nothing to classify | (run never started) | — | no | seq-allocation test |
-| M1 | Journal created, anchor `FILE_CREATE` failed | empty/uninitialized | missing | none | abandoned-forward-init (§4) | no (seq consumed) | per §9 | disclosed | W2 fail-inject |
-| M2 | RUN-START written, not flushed | torn/complete RUN-START, unanchored | missing | none | RUN-START without anchor ⇒ declared-inert (§4) | no | disclosed | no | W2 fail-inject |
-| M3 | RUN-START flushed, genesis anchor not appended | complete RUN-START | missing/empty | none | declared-inert (§4) | no | disclosed | no | W2 fail-inject |
-| M4 | Genesis anchor appended, not flushed | RUN-START | torn anchor tail | none | uncovered(J)=∅ ⇒ debris disclosed (§4.1) | no (next op forbidden live) | n/a | no | W2 fail-inject |
-| M5 | INTENT write failure | torn tail beyond coverage | unchanged | source intact | torn INTENT ⇒ **blocked** (§4.1/R20) | no | read-only evidence | no | W3 fail-inject |
-| M6 | INTENT flushed, anchor append/flush failed | complete uncovered INTENT | coverage excludes it | source intact | complete uncovered INTENT ⇒ **blocked** (R19/W2) | no | read-only evidence | no | W3 fail-inject |
-| M7 | INTENT anchored, rename not yet performed | covered INTENT | covers INTENT | source intact | dangling covered INTENT ⇒ **blocked** | no | read-only evidence | no | restart-matrix test |
-| M8 | Rename done, RESULT not written | covered INTENT | covers INTENT | file moved | same blocked (outcome unknown) | no | read-only evidence | no | restart-matrix test |
-| M9 | RESULT write/flush failure | covered INTENT + torn/uncovered RESULT | varies | moved | torn uncovered RESULT ⇒ blocked; complete uncovered RESULT ⇒ outcome + caveat (§4.1/W3) | no | read-only evidence | no | W3 fail-inject |
-| M10 | RESULT anchored | covered through RESULT | covers RESULT | moved | classified by outcome (state A/B semantics) | next move permitted | per §9 | no | restart-matrix test |
-| M11 | RUN-END partial/failed | complete move set + torn terminal END | unchanged | moved | terminal rules (§7, R2) | resolved; disclosed | eligible (fold) | no | W3 fail-inject |
-| M12 | Quota exhaustion at open | unchanged | unchanged | unchanged | refusal before any file creation | no (exit 3) | n/a | no | T-50 analogue |
-| M13 | Storage handle loss / termination | kernel-flushed prefix only | kernel-flushed prefix only | last anchored rename persists | evidence-only classification (R24) | per classification | per classification | if blocked | termination tests |
+| M0 | No journal created | none | none | none | nothing to classify | (run never started) | — | no | seq-allocation test (T-84) |
+| M1 | Journal created, anchor `FILE_CREATE` failed | empty/uninitialized | missing | none | abandoned-forward-init (§4, G2/R14) | no (seq consumed) | per §9 | disclosed | init fail-inject (T-85) |
+| M2 | RUN-START written, not flushed | torn RUN-START ⇒ abandoned-forward-init (§4.1/G2); complete unanchored RUN-START ⇒ declared-inert (§4) | missing | none | split per torn/complete | no | disclosed | no | journal-write fail-inject (T-86) |
+| M3 | RUN-START flushed, genesis anchor not appended | complete RUN-START | missing/empty | none | declared-inert (§4) | no | disclosed | no | anchor-append fail-inject, W4 (T-87) |
+| M4 | Genesis anchor appended, not flushed | RUN-START | torn genesis anchor tail | none | **declared-inert** (§4): covered RUN-START/no-INTENT if the genesis record survived complete; anchor-absent declared-inert disclosure otherwise — the implemented classifier (`journal_classify.cpp`) resolves the W6-vs-initialization tension as declared-inert at genesis | no (next op forbidden live) | n/a | no | anchor-flush fail-inject, W5 (T-88) |
+| M5 | INTENT write failure (W1) | torn tail beyond coverage | unchanged | source intact | torn INTENT ⇒ **blocked** (§4.1/R20) | no | read-only evidence | no | journal-write fail-inject, W1 (T-89) |
+| M6 | INTENT/anchor write or flush failure (W2/W4/W5) | complete uncovered INTENT | coverage excludes it | source intact | complete uncovered INTENT ⇒ **blocked** (R19; W2 journal-flush and W4/W5 anchor failures leave the same shape) | no | read-only evidence | no | anchor fail-inject (T-90) |
+| M7 | INTENT anchored, rename not yet performed | covered INTENT | covers INTENT | source intact | dangling covered INTENT ⇒ **blocked** | no | read-only evidence | no | restart-matrix test (T-91) |
+| M8 | Rename done, RESULT not written | covered INTENT | covers INTENT | file moved | same blocked (outcome unknown) | no | read-only evidence | no | restart-matrix test (T-91) |
+| M9 | RESULT write/flush failure (W3) | covered INTENT + torn/uncovered RESULT | varies | moved | torn uncovered RESULT ⇒ blocked; complete uncovered RESULT ⇒ outcome + caveat (§4.1/W3) | no | read-only evidence | no | W3 fail-inject (T-92) |
+| M10 | RESULT anchored | covered through RESULT | covers RESULT | moved | classified by outcome (state A/B semantics) | next move permitted | per §9 | no | restart-matrix test (T-91) |
+| M11 | RUN-END partial/failed | complete move set + torn terminal END | unchanged | moved | terminal rules (§7, R2) | resolved; disclosed | eligible (fold) | no | W3 fail-inject (T-93) |
+| M12 | Quota exhaustion at open | unchanged | unchanged | unchanged | refusal before any file creation | no (exit 3) | n/a | no | T-50 analogue + exit-code assertion (T-94) |
+| M13 | Storage handle loss / termination | written prefix survives process death; flush-confirmed prefix survives power loss | same | last anchored rename persists | evidence-only classification (R24) | per classification | per classification | if blocked | termination tests (T-95) |
 
-No automatic recovery is promised; unanchored/ambiguous states keep the
-ratified blocking semantics.
+Forward-run windows only; attempt-segment windows (UNDO-INTENT/UNDO-RESULT,
+§10/§6.2, T-59/T-62/T-62b) land with 7.3. Forward apply **after restart**
+follows §9.5: a declared-inert or abandoned-init newest chain permits forward
+apply with disclosure (G2/R10, T-45…47). No automatic recovery is promised;
+unanchored/ambiguous states keep the ratified blocking semantics.
 
 #### 20.7 Implementation specification
 
@@ -705,18 +717,34 @@ journal/anchor leaf handles; `open_for_run` (classification, allocation,
 quota, `FILE_CREATE`×2, identity capture, RUN-START + genesis anchor),
 `record_intent`, `record_result`, `end_run`; every failure = structured stop
 with the durable-state classification. **W3** — `execute_plan` journaled path
-in the ratified 11-step order; the session exists **only** in the `--apply`
-branch (preview has no journal-write capability by construction — enforced by
-type separation and an audit test). **W4** — `undo_plan`: newest-chain
-selection by name enumeration + ratified parsing/classification/fold; output
-classes Undoable / AlreadyReversed / Conflict / Missing / Replaced / Ambiguous
-/ Blocked / Corrupt; strictly read-only.
+in this explicit order: (1) explicit `--apply` authorization; (2) mutation
+lock acquired; (3) storage root established + capacity reserved; (4) root
+revalidation; (5) category revalidation/creation; (6) session `open_for_run`
+(RUN-START written, flushed, genesis-anchored); (7) per move: INTENT written +
+flushed + anchored; (8) per move: source/destination revalidation; (9) per
+move: no-replace rename; (10) per move: RESULT written + flushed + anchored;
+(11) RUN-END written + flushed (unanchored terminal) and release. The session
+exists **only** in the `--apply` branch — the preview path has **no
+journal-write capability and no rename capability by construction** (type
+separation; §11/§14 audit test asserts BOTH inabilities). **W4** —
+`undo_plan`: newest-chain selection by name enumeration + ratified
+parsing/classification/fold; output classes Undoable / AlreadyReversed /
+Conflict / Missing / Replaced / Ambiguous / Blocked / Corrupt — **every class
+other than Undoable/AlreadyReversed is a refusal**; strictly read-only.
+
+**§18 additions ratified herein:** storage-classification refusal tests
+(case-variant names, malformed recognized-looking names, duplicate/conflicting
+sequence identities, never-choose-between-conflicts); matrix window tests
+**T-84…T-95** (M0–M13, table above); T-50/T-80 exit-code assertions; preview
+dual-inability audit; quota-under-lock ordering assertion.
 
 #### 20.8 Exit-code mapping [G3]
 
-Safety refusals (blocked chains, ambiguous state, unrecognized storage,
-invalid usage) ⇒ exit 2. Operational failures (capacity exhaustion, storage
-I/O, journal-write stops after successful start) ⇒ exit 3. Previews and
+Safety refusals (blocked chains, ambiguous state, unrecognized storage) ⇒
+exit 2. **CLI usage errors remain exit 1 per §2/T-01…04** (unknown option,
+missing/duplicate root, malformed combinations). Operational failures
+(capacity exhaustion — exit 3 explicitly ratified in §20.5 — storage I/O,
+journal-write stops after a successful start) ⇒ exit 3. Previews and
 successful runs ⇒ 0.
 
 ---
