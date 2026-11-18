@@ -33,6 +33,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # STATUS_ENTRYPOINT_NOT_FOUND. Static linking removes any dependency
         # on PATH order.
         target_link_options(folderpilot_build_options INTERFACE -static)
+        # MinGW ld rejects the LTO plugin arguments collect2 passes on every
+        # link, failing silently ("ld returned 1/5" with no diagnostics and
+        # the output unlinked). GCC 16.1 is configured with --enable-lto, so
+        # the plugin is always offered; disabling the linker plugin restores
+        # clean links for all targets (no LTO objects are produced in this
+        # project).
+        add_link_options(-fno-use-linker-plugin)
         # Phase 3 uses Vista/Win8+ surfaces (GetFileInformationByHandleEx with
         # FileIdBothDirectoryInfo, FileIdInfo). Target Windows 10 uniformly so
         # every target sees the same declarations and struct layouts.
@@ -62,6 +69,7 @@ add_library(folderpilot_core STATIC
     lib/folderpilot/executor.cpp
     lib/folderpilot/journal.cpp
     lib/folderpilot/journal_classify.cpp
+    lib/folderpilot/storage_adapter.cpp
 )
 target_include_directories(folderpilot_core PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(folderpilot_core PUBLIC
@@ -76,6 +84,7 @@ target_link_libraries(folderpilot_core PUBLIC
 add_library(folderpilot_platform STATIC
     platform/text.cpp
     platform/native.cpp
+    platform/storage.cpp
     platform/sha256.cpp
 )
 target_include_directories(folderpilot_platform PUBLIC ${CMAKE_SOURCE_DIR}/platform)
@@ -83,9 +92,16 @@ target_include_directories(folderpilot_platform PUBLIC ${CMAKE_SOURCE_DIR}/platf
 # PUBLIC so every consumer of the platform library links the bcrypt import
 # library transitively. bcrypt.dll is a system component; the -static option
 # above applies only to the GCC runtime and is unaffected.
+# Phase 7.1c: advapi32 for the journals-directory ACL validation [G4];
+# shell32/ole32 for SHGetKnownFolderPath + CoTaskMemFree; uuid for the
+# FOLDERID_LocalAppData GUID definition.
 target_link_libraries(folderpilot_platform PUBLIC
     folderpilot_build_options
     bcrypt
+    advapi32
+    shell32
+    ole32
+    uuid
 )
 
 # ---------------------------------------------------------------------------
