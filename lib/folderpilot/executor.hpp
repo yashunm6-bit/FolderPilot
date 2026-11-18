@@ -82,6 +82,7 @@ struct ExecutionResult {
 // development.
 ExecutionResult execute_plan(const OrganizationPlan& plan,
                              std::string_view requested_path,
-                             std::string_view storage_base_path);
+                             std::string_view storage_base_path,
+                             bool undo_window_acknowledged);
 
 } // namespace folderpilot

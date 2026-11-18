@@ -71,6 +71,7 @@ add_library(folderpilot_core STATIC
     lib/folderpilot/journal_classify.cpp
     lib/folderpilot/journal_session.cpp
     lib/folderpilot/storage_adapter.cpp
+    lib/folderpilot/undo_plan.cpp
 )
 target_include_directories(folderpilot_core PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 target_link_libraries(folderpilot_core PUBLIC

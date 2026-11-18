@@ -85,7 +85,11 @@ TEST_CASE("T-84: sequence allocation starts at 1 and advances by name") {
     REQUIRE(f.storage_ok);
 
     {
-        auto first = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+        // A zero-move run: RUN-START + RUN-END with no intents (planned=0 is
+        // the only legal shape for such a journal - the session's end_run
+        // invariant rejects a planned count that exceeds the journaled
+        // intents).
+        auto first = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
         REQUIRE(first.ok);
         CHECK(first.session.root_run_seq() == 1);
         CHECK(first.session.journal_name() == "journal-00000000000000000001.jsonl");
@@ -102,7 +106,9 @@ TEST_CASE("T-84: sequence allocation starts at 1 and advances by name") {
 
     // The second run allocates the next sequence (the first run's files are
     // recognized storage entries).
-    auto second = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+    auto second = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+    INFO("second open: ok=" << second.ok << " failure="
+         << static_cast<int>(second.failure) << " error=" << second.error);
     REQUIRE(second.ok);
     CHECK(second.session.root_run_seq() == 2);
     CHECK(second.session.journal_name() == "journal-00000000000000000002.jsonl");
@@ -152,20 +158,35 @@ TEST_CASE("T-86: storage classification refuses malformed and unrecognized entri
 TEST_CASE("T-94: capacity exhaustion refuses before any file creation") {
     SessionFixture f("js-quota");
     REQUIRE(f.root.ok);
-    auto storage = open_storage_root(f.base.u8(), f.root.root);
-    REQUIRE(storage.ok);
-    std::filesystem::create_directories(f.root_key_dir());
-    // A sparse 129 MiB file exhausts the 128 MiB aggregate quota without
-    // writing the bytes (resize_file reserves the size on NTFS).
+    REQUIRE(f.storage_ok);
+    // Two zero-move runs establish a valid newest chain (journal-...0002);
+    // the OLD journal is then resized to a sparse 129 MiB+1 - it exhausts
+    // the 128 MiB aggregate quota without writing the bytes, and the
+    // newest-chain gate does not parse it (only the newest run's chain is
+    // gated).
+    {
+        auto first = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+        REQUIRE(first.ok);
+        REQUIRE(first.session.end_run(JournalRunEnd{}).ok);
+    }
+    {
+        auto second = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+        REQUIRE(second.ok);
+        REQUIRE(second.session.end_run(JournalRunEnd{}).ok);
+    }
     auto big = f.leaf_path("journal-00000000000000000001.jsonl");
-    { std::ofstream creator(big, std::ios::binary); REQUIRE(creator.is_open()); }
     std::error_code ec;
     std::filesystem::resize_file(big, static_cast<std::uintmax_t>(128) * 1024 * 1024 + 1, ec);
     REQUIRE_FALSE(ec);
 
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+    // Refusal BEFORE any file creation: no journal-...0003 exists.
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
     CHECK_FALSE(opened.ok);
     CHECK(opened.failure == JournalSessionFailure::CapacityExhausted);
+    CHECK_FALSE(std::filesystem::exists(
+        f.leaf_path("journal-00000000000000000003.jsonl")));
+    CHECK_FALSE(std::filesystem::exists(
+        f.leaf_path("anchor-00000000000000000003.jsonl")));
 }
 
 TEST_CASE("T-87: RUN-START and the genesis anchor record are written and flushed") {
@@ -240,7 +261,10 @@ TEST_CASE("T-87/T-91: intent, result and run-end records chain with anchor cover
     recorded = opened.session.record_result(result);
     REQUIRE(recorded.ok);
 
-    recorded = opened.session.end_run(JournalRunEnd{});
+    JournalRunEnd run_end;
+    run_end.planned_count = 1;
+    run_end.moved_count = 1;
+    recorded = opened.session.end_run(run_end);
     REQUIRE(recorded.ok);
 
     // The journal holds RUN-START, INTENT, RESULT, RUN-END with the ratified

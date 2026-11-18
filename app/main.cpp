@@ -81,6 +81,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     std::string directory;
     bool apply = false;
+    bool acknowledge_undo_window = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "--help") {
@@ -94,6 +95,10 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (arg == "--apply") {
             apply = true;
+            continue;
+        }
+        if (arg == "--acknowledge-undo-window") {
+            acknowledge_undo_window = true;
             continue;
         }
         if (!arg.empty() && arg[0] == '-') {
@@ -110,6 +115,12 @@ int wmain(int argc, wchar_t* argv[]) {
     }
 
     if (directory.empty()) {
+        return print_usage();
+    }
+    // Ratified §2 grammar: the acknowledgement option is restricted to
+    // forward execution; without --apply it is a usage error (exit 1).
+    if (acknowledge_undo_window && !apply) {
+        std::cout << "--acknowledge-undo-window requires --apply\n";
         return print_usage();
     }
 
@@ -148,8 +159,8 @@ int wmain(int argc, wchar_t* argv[]) {
         std::cout << "Storage base unavailable: " << storage_base.error << "\n";
         return 3;
     }
-    const auto result =
-        folderpilot::execute_plan(plan, directory, storage_base.path_utf8);
+    const auto result = folderpilot::execute_plan(
+        plan, directory, storage_base.path_utf8, acknowledge_undo_window);
     std::cout << folderpilot::render_execution_report(plan, result);
     if (result.aborted) {
         return result.abort_exit_code; // nothing was moved (2 safety / 3 operational)

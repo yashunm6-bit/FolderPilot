@@ -54,6 +54,16 @@ struct JournalSessionResult {
     unsigned long native_code = 0;
 };
 
+// Test-only fail-injection seam for the ratified §20.6 matrix windows
+// (T-86..T-95): production always passes the default (no faults). Counters
+// are 1-based over the session's durable-record operations.
+struct JournalSessionFaults {
+    int fail_journal_append_at = -1;   // W1: the Nth journal append fails
+    int fail_journal_flush_at = -1;    // W2: the Nth journal flush fails
+    int fail_anchor_append_at = -1;    // W4: the Nth anchor append fails
+    int fail_anchor_flush_at = -1;     // W5: the Nth anchor flush fails
+};
+
 struct JournalSessionOpenResult;
 
 // The write-ahead journal session for one forward run. Move-only: the
@@ -76,7 +86,8 @@ public:
         const platform::RootDirectory& organized_root,
         unsigned long long planned_move_count,
         bool undo_window_acknowledged,
-        unsigned long long supersedes_root_run_seq);
+        unsigned long long supersedes_root_run_seq,
+        const JournalSessionFaults& faults = {});
 
     // Writes INTENT (serialized with the running prev chain), flushes the
     // journal, appends the covering anchor record, flushes the anchor. The
@@ -124,11 +135,18 @@ private:
     std::string anchor_name_;
     unsigned long long root_run_seq_ = 0;
     unsigned long long next_seq_ = 0;
+    unsigned long long intents_written_ = 0;
     unsigned long long anchor_seq_ = 0;
     unsigned long long journal_bytes_ = 0;
     std::string prev_hex_;
     bool open_ = false;
     bool run_ended_ = false;
+    bool stopped_ = false;             // R1 latch: no records after a durable failure
+    JournalSessionFaults faults_{};
+    unsigned long long journal_appends_ = 0;
+    unsigned long long journal_flushes_ = 0;
+    unsigned long long anchor_appends_ = 0;
+    unsigned long long anchor_flushes_ = 0;
 };
 
 // Result of open_for_run: either an open session or a classified failure

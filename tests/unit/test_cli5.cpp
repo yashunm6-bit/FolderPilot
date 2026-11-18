@@ -79,7 +79,10 @@ TEST_CASE("CLI --apply replans on every invocation: an injected conflict is re-r
     REQUIRE(fixture::create_file(dir.path(), L"resume.pdf", "second"));
     REQUIRE(fixture::create_file(dir.path() / L"Documents", L"resume (2).pdf", "injected"));
 
-    const auto second = run_folderpilot_cli({wide_path(dir), L"--apply"});
+    // The first apply created a live undo window (§9.5): the second forward
+    // apply supersedes it through the ratified acknowledgement option.
+    const auto second = run_folderpilot_cli(
+        {wide_path(dir), L"--apply", L"--acknowledge-undo-window"});
     CHECK(second.exit_code == 0);
     // Fresh reservation: "resume.pdf" and "resume (2).pdf" are both taken in
     // the destination, so the planner reserves "resume (3).pdf" and the

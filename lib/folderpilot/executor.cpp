@@ -39,7 +39,8 @@ bool is_skipped_outcome(MoveOutcome outcome) {
 
 ExecutionResult execute_plan(const OrganizationPlan& plan,
                              std::string_view requested_path,
-                             std::string_view storage_base_path) {
+                             std::string_view storage_base_path,
+                             bool undo_window_acknowledged) {
     ExecutionResult result;
 
     // ---- 1. Batch-level validation (nothing has been mutated yet). ----
@@ -94,7 +95,8 @@ ExecutionResult execute_plan(const OrganizationPlan& plan,
     }
     {
         auto opened = JournalSession::open_for_run(
-            storage_base_path, root, plan.planned_count(), false, 0);
+            storage_base_path, root, plan.planned_count(),
+            undo_window_acknowledged, 0);
         if (!opened.ok) {
             result.aborted = true;
             result.abort_reason = "journal session refused: " + opened.error;

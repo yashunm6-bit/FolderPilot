@@ -84,7 +84,7 @@ TEST_CASE("executor moves files into created and existing categories") {
     REQUIRE(fx.plan.valid());
     REQUIRE(fx.plan.planned_count() == 3);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     CHECK_FALSE(result.aborted);
     CHECK(result.planned_count == 3);
     CHECK(result.moved_count == 3);
@@ -127,7 +127,7 @@ TEST_CASE("executor moves unicode, compound, dotfile and extensionless names") {
     REQUIRE(fx.plan.valid());
     REQUIRE(fx.plan.planned_count() == 4);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     CHECK(result.moved_count == 4);
     CHECK(std::filesystem::exists(fx.dir.path() / L"Documents" / L"\x6587\x4EF6.txt"));
     CHECK(std::filesystem::exists(fx.dir.path() / L"Archives" / L"backup.tar.gz"));
@@ -156,7 +156,7 @@ TEST_CASE("executor reports a conflict when the destination exists and preserves
     // Simulate a destination appearing AFTER planning under the planned name.
     REQUIRE(fixture::create_file(fx.dir.path() / L"Documents", L"resume (2).pdf", "late"));
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::Conflict);
     CHECK(result.conflict_count == 1);
@@ -197,7 +197,7 @@ TEST_CASE("executor rejects a source replaced after planning") {
     REQUIRE_FALSE(id_after.empty());
     REQUIRE(id_before != id_after); // the identity genuinely changed
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::SourceReplaced);
     CHECK(result.moved_count == 0);
@@ -219,7 +219,7 @@ TEST_CASE("executor reports a source that vanished after planning") {
 
     REQUIRE(::DeleteFileW((fx.dir.path() / L"ghost.txt").c_str()) != 0);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::SourceMissing);
     CHECK(result.moved_count == 0);
@@ -240,7 +240,7 @@ TEST_CASE("executor keeps a content-modified file (identity-not-content policy)"
     // Same file, different content: identity is unchanged, so it still moves.
     REQUIRE(fixture::create_file(fx.dir.path(), L"diary.txt", "v2-with-more-text"));
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::Moved);
     CHECK(file_exists_with_content(fx.dir.path() / L"Documents" / L"diary.txt",
@@ -276,7 +276,7 @@ TEST_CASE("executor reports a locked source and continues independent moves") {
     // so fixture cleanup can always delete the directory.
     platform::unique_handle held{raw};
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     REQUIRE(result.records.size() == 2);
     const auto* locked = find_record(result, "locked.txt");
     REQUIRE(locked != nullptr);
@@ -300,7 +300,7 @@ TEST_CASE("executor aborts before any mutation when the root changed") {
     SandboxDir other{"exec-root-b", SandboxRoot::Phase5};
     REQUIRE(fixture::create_file(other.path(), L"resume.pdf", "other"));
 
-    const auto result = execute_plan(fx.plan, other.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, other.u8(), fx.storage.u8(), false);
     CHECK(result.aborted);
     CHECK(result.abort_reason.find("RootChanged") != std::string::npos);
     CHECK(result.records.empty());
@@ -319,7 +319,7 @@ TEST_CASE("executor aborts on an invalid plan before any mutation") {
 
     const auto plan = build_plan(fx.guard.root, scan);
     CHECK_FALSE(plan.valid());
-    const auto result = execute_plan(plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(plan, fx.dir.u8(), fx.storage.u8(), false);
     CHECK(result.aborted);
     CHECK(result.records.empty());
     CHECK(std::filesystem::exists(fx.dir.path() / L"resume.pdf"));
@@ -339,7 +339,7 @@ TEST_CASE("executor rejects a category directory replaced after planning") {
     // executor must detect the identity change and never adopt it.
     REQUIRE(::RemoveDirectoryW((fx.dir.path() / L"Documents").c_str()) != 0);
     REQUIRE(fixture::create_directory(fx.dir.path(), L"Documents"));
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     // The fresh directory has a DIFFERENT identity -> DestinationChanged.
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::DestinationChanged);
@@ -360,7 +360,7 @@ TEST_CASE("executor reports a category that was deleted after planning") {
     // replacement and must NOT create it (the plan said it exists).
     REQUIRE(::RemoveDirectoryW((fx.dir.path() / L"Documents").c_str()) != 0);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::DestinationChanged);
     CHECK(result.moved_count == 0);
@@ -543,7 +543,7 @@ TEST_CASE("Phase 7.2: journaled apply writes the ratified record chain with anch
     REQUIRE(fx.plan.planned_count() == 1);
     const unsigned long long planned_ctime = fx.plan.moves()[0].creation_time_filetime;
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
     CHECK_FALSE(result.aborted);
     CHECK(result.journal_active);
     CHECK_FALSE(result.journal_stopped);
