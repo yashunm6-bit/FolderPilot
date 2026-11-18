@@ -333,6 +333,8 @@ using JournalRecord = std::variant<JournalRunStart, JournalIntent, JournalResult
 struct JournalSerializeResult {
     bool ok = false;
     std::string canonical;   // the LF-terminated canonical line (or file)
+    std::string integrity_hex;  // this record's own integrity (the anchor's
+                                // last_record_hash); single-record form only
     std::string error;       // meaningful when !ok
 };
 

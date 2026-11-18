@@ -18,6 +18,8 @@
 
 #include "../phase3_fixture.hpp"
 #include "folderpilot/executor.hpp"
+#include "folderpilot/journal.hpp"
+#include "folderpilot/storage_adapter.hpp"
 #include "folderpilot/path_guard.hpp"
 #include "folderpilot/planner.hpp"
 #include "folderpilot/scanner.hpp"
@@ -31,12 +33,14 @@ namespace {
 // Validates, scans, and plans a fixture in one step (Phase 5 sandbox).
 struct PlannedFixture {
     SandboxDir dir;
+    SandboxDir storage;              // the journal-session base (Phase 7.2)
     PathGuardResult guard;
     ScanResult scan;
     OrganizationPlan plan;
 
     explicit PlannedFixture(const std::string& name)
-        : dir{name, SandboxRoot::Phase5} {
+        : dir{name, SandboxRoot::Phase5},
+          storage{name + "-storage", SandboxRoot::Phase5} {
         guard = validate_target(dir.u8());
         if (guard.ok) {
             scan = scan_directory(guard.root);
@@ -80,7 +84,7 @@ TEST_CASE("executor moves files into created and existing categories") {
     REQUIRE(fx.plan.valid());
     REQUIRE(fx.plan.planned_count() == 3);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     CHECK_FALSE(result.aborted);
     CHECK(result.planned_count == 3);
     CHECK(result.moved_count == 3);
@@ -123,7 +127,7 @@ TEST_CASE("executor moves unicode, compound, dotfile and extensionless names") {
     REQUIRE(fx.plan.valid());
     REQUIRE(fx.plan.planned_count() == 4);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     CHECK(result.moved_count == 4);
     CHECK(std::filesystem::exists(fx.dir.path() / L"Documents" / L"\x6587\x4EF6.txt"));
     CHECK(std::filesystem::exists(fx.dir.path() / L"Archives" / L"backup.tar.gz"));
@@ -152,7 +156,7 @@ TEST_CASE("executor reports a conflict when the destination exists and preserves
     // Simulate a destination appearing AFTER planning under the planned name.
     REQUIRE(fixture::create_file(fx.dir.path() / L"Documents", L"resume (2).pdf", "late"));
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::Conflict);
     CHECK(result.conflict_count == 1);
@@ -193,7 +197,7 @@ TEST_CASE("executor rejects a source replaced after planning") {
     REQUIRE_FALSE(id_after.empty());
     REQUIRE(id_before != id_after); // the identity genuinely changed
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::SourceReplaced);
     CHECK(result.moved_count == 0);
@@ -215,7 +219,7 @@ TEST_CASE("executor reports a source that vanished after planning") {
 
     REQUIRE(::DeleteFileW((fx.dir.path() / L"ghost.txt").c_str()) != 0);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::SourceMissing);
     CHECK(result.moved_count == 0);
@@ -236,7 +240,7 @@ TEST_CASE("executor keeps a content-modified file (identity-not-content policy)"
     // Same file, different content: identity is unchanged, so it still moves.
     REQUIRE(fixture::create_file(fx.dir.path(), L"diary.txt", "v2-with-more-text"));
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::Moved);
     CHECK(file_exists_with_content(fx.dir.path() / L"Documents" / L"diary.txt",
@@ -272,7 +276,7 @@ TEST_CASE("executor reports a locked source and continues independent moves") {
     // so fixture cleanup can always delete the directory.
     platform::unique_handle held{raw};
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     REQUIRE(result.records.size() == 2);
     const auto* locked = find_record(result, "locked.txt");
     REQUIRE(locked != nullptr);
@@ -296,7 +300,7 @@ TEST_CASE("executor aborts before any mutation when the root changed") {
     SandboxDir other{"exec-root-b", SandboxRoot::Phase5};
     REQUIRE(fixture::create_file(other.path(), L"resume.pdf", "other"));
 
-    const auto result = execute_plan(fx.plan, other.u8());
+    const auto result = execute_plan(fx.plan, other.u8(), fx.storage.u8());
     CHECK(result.aborted);
     CHECK(result.abort_reason.find("RootChanged") != std::string::npos);
     CHECK(result.records.empty());
@@ -315,7 +319,7 @@ TEST_CASE("executor aborts on an invalid plan before any mutation") {
 
     const auto plan = build_plan(fx.guard.root, scan);
     CHECK_FALSE(plan.valid());
-    const auto result = execute_plan(plan, fx.dir.u8());
+    const auto result = execute_plan(plan, fx.dir.u8(), fx.storage.u8());
     CHECK(result.aborted);
     CHECK(result.records.empty());
     CHECK(std::filesystem::exists(fx.dir.path() / L"resume.pdf"));
@@ -335,7 +339,7 @@ TEST_CASE("executor rejects a category directory replaced after planning") {
     // executor must detect the identity change and never adopt it.
     REQUIRE(::RemoveDirectoryW((fx.dir.path() / L"Documents").c_str()) != 0);
     REQUIRE(fixture::create_directory(fx.dir.path(), L"Documents"));
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     // The fresh directory has a DIFFERENT identity -> DestinationChanged.
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::DestinationChanged);
@@ -356,7 +360,7 @@ TEST_CASE("executor reports a category that was deleted after planning") {
     // replacement and must NOT create it (the plan said it exists).
     REQUIRE(::RemoveDirectoryW((fx.dir.path() / L"Documents").c_str()) != 0);
 
-    const auto result = execute_plan(fx.plan, fx.dir.u8());
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
     REQUIRE(result.records.size() == 1);
     CHECK(result.records[0].outcome == MoveOutcome::DestinationChanged);
     CHECK(result.moved_count == 0);
@@ -507,5 +511,89 @@ TEST_CASE("controlled A/B: Win32 class-3 vs native class-10 anchored rename") {
                                                            "orphan.txt");
         CHECK_FALSE(r.ok);
         CHECK(r.failure == platform::NativeFailure::Other);
+    }
+}
+namespace {
+
+// Reads a storage leaf back through the ratified read open (local helper).
+std::string read_storage_leaf(const StorageRoot& storage, const std::string& name) {
+    auto leaf = open_journal_leaf_read(storage, name);
+    if (!leaf.ok || !leaf.handle.valid()) {
+        return {};
+    }
+    std::string contents;
+    char buffer[4096];
+    DWORD read = 0;
+    while (::ReadFile(leaf.handle.get(), buffer, sizeof(buffer), &read, nullptr) &&
+           read > 0) {
+        contents.append(buffer, static_cast<std::size_t>(read));
+    }
+    return contents;
+}
+
+} // namespace
+
+TEST_CASE("Phase 7.2: journaled apply writes the ratified record chain with anchor coverage") {
+    PlannedFixture fx{"exec-journaled"};
+    REQUIRE(fx.guard.ok);
+    REQUIRE(fixture::create_file(fx.dir.path(), L"report.pdf", "report-content"));
+    fx.scan = scan_directory(fx.guard.root);
+    fx.plan = build_plan(fx.guard.root, fx.scan);
+    REQUIRE(fx.plan.valid());
+    REQUIRE(fx.plan.planned_count() == 1);
+    const unsigned long long planned_ctime = fx.plan.moves()[0].creation_time_filetime;
+
+    const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8());
+    CHECK_FALSE(result.aborted);
+    CHECK(result.journal_active);
+    CHECK_FALSE(result.journal_stopped);
+    CHECK(result.moved_count == 1);
+    CHECK(std::filesystem::exists(fx.dir.path() / L"Documents" / L"report.pdf"));
+
+    // The journal holds RUN-START, INTENT, RESULT, RUN-END with the ratified
+    // prev chaining; the anchor covers exactly the three anchored records.
+    auto storage = open_storage_root(fx.storage.u8(), fx.guard.root);
+    REQUIRE(storage.ok);
+    const std::string journal_bytes =
+        read_storage_leaf(storage, "journal-00000000000000000001.jsonl");
+    REQUIRE_FALSE(journal_bytes.empty());
+    const std::vector<unsigned char> image(journal_bytes.begin(), journal_bytes.end());
+    const auto parsed = parse_journal_file(image, storage.root_key);
+    INFO("journal parse: valid=" << parsed.valid << " kind="
+         << static_cast<int>(parsed.failure.kind) << " detail=" << parsed.failure.detail);
+    REQUIRE(parsed.valid);
+    REQUIRE(parsed.records.size() == 4);
+    const auto* start = std::get_if<JournalRunStart>(&parsed.records[0]);
+    REQUIRE(start != nullptr);
+    CHECK(start->planned_move_count == 1);
+    CHECK(start->lock_id.size() == 64);
+    CHECK(start->root_id == storage.root_key);
+    const auto* intent = std::get_if<JournalIntent>(&parsed.records[1]);
+    REQUIRE(intent != nullptr);
+    CHECK(intent->move_id == 0);
+    CHECK(intent->source_name == "report.pdf");
+    CHECK(intent->dest_name == "report.pdf");
+    CHECK(intent->file_ctime == planned_ctime);
+    CHECK(intent->file_size == 14);
+    const auto* jr = std::get_if<JournalResult>(&parsed.records[2]);
+    REQUIRE(jr != nullptr);
+    CHECK(jr->move_id == 0);
+    CHECK(jr->outcome == JournalOutcome::Moved);
+    const auto* end = std::get_if<JournalRunEnd>(&parsed.records[3]);
+    REQUIRE(end != nullptr);
+    CHECK(end->moved_count == 1);
+
+    const std::string anchor_bytes =
+        read_storage_leaf(storage, "anchor-00000000000000000001.jsonl");
+    REQUIRE_FALSE(anchor_bytes.empty());
+    const std::vector<unsigned char> anchor_image(anchor_bytes.begin(),
+                                                  anchor_bytes.end());
+    const auto anchor_parsed = parse_anchor_file(anchor_image);
+    REQUIRE(anchor_parsed.valid);
+    REQUIRE(anchor_parsed.records.size() == 3); // RUN-END is an unanchored terminal
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(anchor_parsed.records[i].covered_seq == i);
+        CHECK(anchor_parsed.records[i].last_record_hash ==
+              journal_hex(parsed.record_digests[i]));
     }
 }

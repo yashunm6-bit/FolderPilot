@@ -51,7 +51,11 @@ struct MoveRecord {
 
 struct ExecutionResult {
     bool aborted = false;              // batch-level abort (root/plan rejection)
+    int abort_exit_code = 2;           // ratified mapping: 2 safety, 3 operational
     std::string abort_reason;
+    bool journal_active = false;       // the run wrote a journaled session (Phase 7.2)
+    bool journal_stopped = false;      // R1: a durable-record failure stopped the run
+    std::string journal_error;         // the classified stop reason
     std::size_t planned_count = 0;
     std::size_t moved_count = 0;
     std::size_t conflict_count = 0;
@@ -67,9 +71,17 @@ struct ExecutionResult {
 // Executes the plan. `requested_path` is re-bootstrapped through the
 // approved PathGuard mechanism; the fresh root identity, resolved path and
 // volume GUID must match the plan, otherwise the whole execution aborts
-// before any mutation (RootChanged). All `--apply` invocations must target
-// synthetic sandbox fixtures during development.
+// before any mutation (RootChanged). `storage_base_path` is the journaled
+// storage base (production: the %LOCALAPPDATA% analogue; tests: a synthetic
+// sandbox) - every mutation is journaled through a Phase 7.2 write-ahead
+// session: RUN-START before the first move, INTENT (flushed + anchored)
+// before each rename, RESULT (flushed + anchored) after it, RUN-END as the
+// unanchored terminal. A durable-record failure stops the run per R1 (later
+// moves are reported as not attempted; the journal is never rewritten).
+// All `--apply` invocations must target synthetic sandbox fixtures during
+// development.
 ExecutionResult execute_plan(const OrganizationPlan& plan,
-                             std::string_view requested_path);
+                             std::string_view requested_path,
+                             std::string_view storage_base_path);
 
 } // namespace folderpilot

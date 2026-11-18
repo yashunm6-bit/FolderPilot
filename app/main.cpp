@@ -35,6 +35,7 @@
 #include "folderpilot/planner.hpp"
 #include "folderpilot/reporter.hpp"
 #include "folderpilot/scanner.hpp"
+#include "storage.hpp"
 #include "text.hpp"
 
 namespace {
@@ -139,11 +140,22 @@ int wmain(int argc, wchar_t* argv[]) {
         return 0;
     }
 
-    // 4b. Explicitly authorized execution against the validated root.
-    const auto result = folderpilot::execute_plan(plan, directory);
+    // 4b. Explicitly authorized execution against the validated root. Every
+    // mutation is journaled through the Phase 7.2 write-ahead session
+    // (storage base: the %LOCALAPPDATA% analogue).
+    const auto storage_base = folderpilot::platform::local_app_data_path();
+    if (!storage_base.ok) {
+        std::cout << "Storage base unavailable: " << storage_base.error << "\n";
+        return 3;
+    }
+    const auto result =
+        folderpilot::execute_plan(plan, directory, storage_base.path_utf8);
     std::cout << folderpilot::render_execution_report(plan, result);
     if (result.aborted) {
-        return 2; // nothing was moved
+        return result.abort_exit_code; // nothing was moved (2 safety / 3 operational)
+    }
+    if (result.journal_stopped) {
+        return 3; // the run stopped on a durable-record failure (R1)
     }
     return result.all_moved() ? 0 : 3;
 }

@@ -22,6 +22,7 @@ add_executable(folderpilot_tests
     unit/test_sha256.cpp
     unit/test_journal.cpp
     unit/test_journal_chain.cpp
+    unit/test_journal_session.cpp
     unit/test_storage.cpp
 )
 

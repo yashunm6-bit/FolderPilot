@@ -1941,13 +1941,15 @@ namespace {
 // `integrity` member (including `prev` when the record carries one), with
 // the closing brace re-appended - exactly the bytes the parser reconstructs
 // when it verifies the hash. The terminating LF is never hashed.
-bool assemble_record_line(std::string& core, std::string& out, std::string& error) {
+bool assemble_record_line(std::string& core, std::string& out, std::string& error,
+                          std::string& integrity_hex) {
     const platform::Sha256Result h = platform::sha256(std::span<const unsigned char>(
         reinterpret_cast<const unsigned char*>(core.data()), core.size()));
     if (!h.ok) {
         error = "SHA-256 provider failed: " + h.error;
         return false;
     }
+    integrity_hex = hex_of(h.digest);
     out.reserve(core.size() + journal_hex_chars + 16);
     out = std::move(core);
     out.pop_back();  // drop the closing brace; the integrity member follows
@@ -1981,7 +1983,7 @@ JournalSerializeResult serialize_journal_record(const JournalRecord& record,
     core += prev_hex;
     core += "\"}";
     std::string line;
-    if (!assemble_record_line(core, line, result.error)) {
+    if (!assemble_record_line(core, line, result.error, result.integrity_hex)) {
         return result;
     }
     if (line.size() > journal_max_record_bytes) {
@@ -2059,7 +2061,8 @@ JournalSerializeResult serialize_anchor_record(const AnchorRecord& record) {
     // Anchor records carry no `prev`: the hashed core is the body as built.
     std::string core = body.bytes;
     std::string line;
-    if (!assemble_record_line(core, line, result.error)) {
+    std::string chain_integrity;
+    if (!assemble_record_line(core, line, result.error, chain_integrity)) {
         return result;
     }
     if (line.size() > 450) {
