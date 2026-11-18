@@ -5,7 +5,12 @@
 > verified the bcrypt linkage and all four NIST vectors on `windows-latest` (2026-11-14).
 > Phase 7.1b (journal records) IMPLEMENTED and hosted-verified at `bc520c2` (run
 > `43924678919`: Debug and Release each 200/200 cases, 13,843/13,843 assertions, zero
-> failed/skipped); §6.3/§12/§15 reconciled to the verified implementation (2026-11-16).**
+> failed/skipped); §6.3/§12/§15 reconciled to the verified implementation (2026-11-16).
+> Phase 7.1c (storage adapter) IMPLEMENTED and hosted-verified at `e98089f` (run
+> `44341177181`: Debug and Release each 225/225 cases, 14,112/14,112 assertions, zero
+> failed/skipped; artifact SHA-256 verified byte-level against the downloaded bytes;
+> genuine cross-process lock contention and crash-release child-process tests pass
+> locally and hosted; ratified Decisions A–E recorded in §16).**
 > Base: `main` @ `823dfed`; design ratified in commit `cc671a3`; G1 closure recorded
 > 2026-11-14 (record date 2026-11-13). Labels: **[W32-DOC]** documented Windows API behavior · **[SRC]** verified
 > repository source/behavior · **[SETTLED]** user decision · **[REC]** recommendation ·
@@ -66,7 +71,9 @@ any component ⇒ refuse. Hidden/system gates apply only to FolderPilot-created 
 (`FolderPilot`, `journals`, `<root-key>`); the legitimately hidden `AppData` ancestor is
 accepted [W32-DOC: `AppData` carries `FILE_ATTRIBUTE_HIDDEN`]. `<root-key>` identity is
 re-verified every session; ACL **validation** (not construction) of the journals
-directory [G4]. Journal, segment and anchor files are never located inside the organized
+directory [G4] — operability scope per ratified Decision D, with absent and NULL
+DACLs refused outright and empty DACLs denied through AccessCheck per ratified
+Decision A (2026-11-17/18). Journal, segment and anchor files are never located inside the organized
 tree and are never scanned by FolderPilot.
 
 **Leaf-open protocol — `FILE_OPEN_REPARSE_POINT` is mandatory on every open that can
@@ -75,10 +82,26 @@ resolution occurs during the open]:**
 
 | Leaf | Disposition | Options | Access / share | Post-open validation |
 |---|---|---|---|---|
-| Lock (first) | `FILE_OPEN_IF` + `FILE_OPEN_REPARSE_POINT` | — | `SYNCHRONIZE\|FILE_READ_ATTRIBUTES` / **0** | tag = regular, non-reparse ⇒ hold |
+| Lock (first) | `FILE_OPEN_IF` + `FILE_OPEN_REPARSE_POINT` | — | `SYNCHRONIZE\|FILE_READ_ATTRIBUTES\|FILE_READ_DATA` / **0** | tag = regular, non-reparse ⇒ hold |
 | Lock (later) | `FILE_OPEN` + `FILE_OPEN_REPARSE_POINT` | — | same | same |
-| Journal/segment (fresh seq) | `FILE_CREATE` (refuse-on-exists) | — | `GENERIC_WRITE\|SYNCHRONIZE` / `FILE_SHARE_READ` | regular file |
+| Journal/segment (fresh seq) | `FILE_CREATE` (refuse-on-exists) | — | `GENERIC_WRITE\|FILE_READ_ATTRIBUTES\|SYNCHRONIZE` / `FILE_SHARE_READ` | regular file |
 | Journal/segment/anchor (read) | `FILE_OPEN` + `FILE_OPEN_REPARSE_POINT` | — | `FILE_GENERIC_READ` / R\|W\|D | regular, non-reparse |
+
+**Access-mask corrections [SRC, runtime evidence 2026-11-18]:** the lock masks
+carry `FILE_READ_DATA` because sharing checks exempt attributes-only access —
+without a data bit the holder's share-0 could never conflict and the probe's
+`held` outcome (and exclusive re-acquisition refusal) would be unreachable.
+The create mask carries `FILE_READ_ATTRIBUTES` because the mandated post-open
+validation (`FileAttributeTagInfo`, identity capture) fails `ACCESS_DENIED`
+against a write-only handle. The journals-directory ACL validator
+AccessChecks with `DACL\|OWNER\|GROUP` information and a Query-level
+impersonation duplicate of the process token: `AccessCheck` fails
+`ERROR_BAD_IMPERSONATION_LEVEL` against a primary token and
+`ERROR_INVALID_SECURITY_DESCR` against a group-less descriptor (a
+`SetNamedSecurityInfoW` DACL write leaves the un-requested group out of the
+returned descriptor). The aggregate-quota recompute skips the `.`/`..`
+prefix records (scanner `ReservedName` parity) and refuses every other
+directory entry.
 
 Unexpected type or reparse tag ⇒ structured refusal (`ReparseLeaf`/`NotRegularFile`);
 no deletion, no traversal, no fallback.
@@ -475,6 +498,11 @@ may be longer than the surviving files show".
 | G8 | Anchor protocol + expected-record-aware classification (§4–§7) | **RATIFIED** | tests T-60…70 |
 | G9 | Attempt segments unanchored + reconciliation exception (§9.3) | **RATIFIED** | tests T-54…62b |
 | G10 | No external checkpoint subsystem — conservative blocking is sufficient; coordinated rollback accepted as R25 | **RATIFIED** | §7 disclosure |
+| G11 | Decision A: journals-directory ACL validator refuses absent and NULL DACLs; empty DACL denied through AccessCheck | **RATIFIED 2026-11-17** (owner; ChatGPT-delegated) | dedicated Decision-A test case (NULL-DACL validator refusal; absent/NULL/empty classification; real AccessCheck denial via pre-opened READ_CONTROL handle) |
+| G12 | Decision B: root-key formula retained without creation time | **RATIFIED 2026-11-17** | residual documented in §13 |
+| G13 | Decision C: hidden/system rule retained (reject on FolderPilot-created components, exempt the base ancestor) | **RATIFIED 2026-11-17** | T-18/T-19 analogues |
+| G14 | Decision D: operability ACL validation retained; no principal-level enforcement claimed | **RATIFIED 2026-11-17** | §3 note |
+| G15 | Decision E: lock_id derivation = SHA-256 of canonical lock-file identity material (conditions confirmed: deterministic canonicalization, stable identity binding, fail-closed) | **RATIFIED 2026-11-17** | RUN-START recording + cross-session verify land in 7.2 |
 
 **Ratification order:** G8 → G9/G10 → G2/G6/G7 → G1 (evidence) → G3/G4/G5 (before 7.4).
 
@@ -482,7 +510,7 @@ may be longer than the surviving files show".
 
 | Step | Content | Gate |
 |---|---|---|
-| 7.1 | Journal module (deep module, C++20): canonical serializer, SHA-256 via BCrypt with hosted link probe + known-answer test, bounds enforcement; pure unit tests. **7.1a done: probe landed in `dea0dc6`; G1 closed (run `43598561201`, §16). 7.1b done: journal core landed (`b52179c` + remediation through `bc520c2`), hosted CI green (run `43924678919`: Debug and Release 200/200 cases, 13,843/13,843 assertions)** | 7.1b report |
+| 7.1 | Journal module (deep module, C++20): canonical serializer, SHA-256 via BCrypt with hosted link probe + known-answer test, bounds enforcement; pure unit tests. **7.1a done: probe landed in `dea0dc6`; G1 closed (run `43598561201`, §16). 7.1b done: journal core landed (`b52179c` + remediation through `bc520c2`), hosted CI green (run `43924678919`: Debug and Release 200/200 cases, 13,843/13,843 assertions)** **7.1c done: storage adapter landed (`2c252e5` + `c1d38d0` + `e98089f`), hosted CI green (run `44341177181`: Debug and Release each 225/225 cases, 14,112/14,112 assertions, zero failed/skipped; artifact SHA-256 verified byte-level; genuine cross-process lock tests pass locally and hosted)** | 7.1b report |
 | 7.2 | Forward-executor journal integration (write-ahead) + undo planning + reconciliation | Report |
 | 7.3 | Undo execution + undo report + exit codes | Report |
 | 7.4 | CLI surface (`--undo`, ack flag), reporter, **G5 wording + executor.hpp amendment + docs** | Report |
@@ -559,7 +587,7 @@ and sharing-conflict arithmetic; `FlushFileBuffers` GENERIC_WRITE requirement; k
 handle cleanup at termination; `SetFileTime` mutability; NTFS tunneling; hidden `AppData`
 attribute; filename-component character prohibitions; written-bytes-survive-process-
 death. **[SRC]** scanner identity/`Unsupported` skip; opened-handle authority; platform-
-only Win32 layering; 144/1,762 local and hosted CI evidence. **[VERIFIED]** MinGW bcrypt
+only Win32 layering; 144/1,762 local and hosted CI evidence. Storage-adapter runtime findings (2026-11-18): `AccessCheck` requires an impersonation-level token (ERROR_BAD_IMPERSONATION_LEVEL against a primary token) and rejects group-less descriptors (ERROR_INVALID_SECURITY_DESCR) — the ACL validator therefore requests DACL|OWNER|GROUP and uses a Query-level impersonation duplicate; sharing checks exempt attributes-only access (FILE_READ_DATA required on the lock masks); `FileAttributeTagInfo`/identity queries require FILE_READ_ATTRIBUTES. **[VERIFIED]** MinGW bcrypt
 import: hosted run `43598561201` built and linked `-lbcrypt` on `windows-latest` (G1
 closed, §16). **[ASSUMPTIONS]** `%LOCALAPPDATA%` ACL defaults; ReFS identity behavior;
 SAC-off window grantable for 7.5.

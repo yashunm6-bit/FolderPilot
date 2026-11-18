@@ -6,7 +6,7 @@ FolderPilot will sort the files of a user-selected directory into category
 folders (Documents, Images, Videos, Audio, Archives, Code, Other) — showing a
 dry-run plan by default and moving files only on an explicit `--apply`.
 
-## Status: Phase 6 — hardening, tests and documentation (complete, formally accepted)
+## Status: Phase 7 — Move Journal & Undo (7.1c storage adapter complete, hosted-verified; Phases 1–6 complete and accepted)
 
 Phases 1–3 delivered the build/test foundation, the classification core,
 PathGuard and the handle-anchored scanner; Phase 4 added planning and
@@ -33,6 +33,18 @@ anonymously (HTTP 401), so exact hosted doctest counts are not claimed.
 (Earlier run `43052752854`, commit `7f4a9db`, also succeeded but uploaded
 no artifact — wrong CTest log path, since fixed. History:
 `docs/PHASE6-CLOSEOUT.md` §3–§4.)
+Runtime verification of the current Phase 7.1c state (commit `e98089f`, storage
+adapter + ratified Decision A, 2026-11-18): **Local (this machine; Smart App
+Control off by owner decision): Debug and Release each 225/225 test cases,
+14,112/14,112 assertions — 0 failed, 0 skipped — including genuine
+cross-process mutation-lock contention and crash-release child-process tests.**
+**Hosted (GitHub Actions, run `44341177181`, CI #14): success in 1m 42s —
+Debug and Release Configure/Build/Test all green; the `folderpilot-test-logs`
+artifact's SHA-256 was verified against the downloaded bytes, and its two
+`LastTest.log` files show the same 225/14,112 totals on the runner.** The
+ratified decisions A–E (NULL/absent-DACL refusal, root-key formula, hidden/
+system rule, operability ACL scope, lock_id derivation convention) are
+recorded in `docs/PHASE7-DESIGN.md` §16.
 Historical, superseded by the figures above — Phase 5 state (commits
 `3940886`, `d024112`): 142/142 test cases, 1,748/1,748 assertions.
 Phase 6 adds Unicode CLI argument handling, Windows hardening, packaging
