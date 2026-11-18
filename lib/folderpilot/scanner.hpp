@@ -42,6 +42,7 @@ struct ScannedFile {
     platform::SourceIdentity identity;     // canonical identity from the opened handle
     unsigned long long size_bytes = 0;
     long long last_write_time = 0;         // Windows FILETIME (100ns units)
+    unsigned long long creation_time_filetime = 0;  // FILE_BASIC_INFO.CreationTime (fingerprint component)
     unsigned long attributes = 0;
 };
 

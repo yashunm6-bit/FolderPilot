@@ -187,6 +187,7 @@ OrganizationPlan build_plan(const platform::RootDirectory& root,
             move.destination_name = *destination;
             move.size_bytes = file->size_bytes;
             move.last_write_time = file->last_write_time;
+            move.creation_time_filetime = file->creation_time_filetime;
             plan.moves_.push_back(std::move(move));
         }
     }

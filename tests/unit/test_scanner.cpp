@@ -84,6 +84,24 @@ TEST_CASE("scanner captures one file with identity and metadata") {
     CHECK((result.files[0].attributes & FILE_ATTRIBUTE_ARCHIVE) != 0);
 }
 
+TEST_CASE("scanner captures the creation time fingerprint component") {
+    fixture::SandboxDir dir{"scan-ctime"};
+    REQUIRE(fixture::create_file(dir.path(), L"notes.txt", "abcd"));
+
+    const auto guard = validate_target(dir.u8());
+    REQUIRE(guard.ok);
+    const auto first = scan_directory(guard.root);
+    REQUIRE(first.enumeration == EnumerationStatus::Ok);
+    REQUIRE(first.files.size() == 1);
+    // CreationTime (not ChangeTime) is captured for the journal fingerprint:
+    // a plausible non-zero FILETIME, stable across scans of the same file.
+    CHECK(first.files[0].creation_time_filetime != 0);
+    const auto second = scan_directory(guard.root);
+    REQUIRE(second.enumeration == EnumerationStatus::Ok);
+    REQUIRE(second.files.size() == 1);
+    CHECK(second.files[0].creation_time_filetime == first.files[0].creation_time_filetime);
+}
+
 TEST_CASE("scanner skips directories, hidden and system entries with reasons") {
     fixture::SandboxDir dir{"scan-mixed"};
     REQUIRE(fixture::create_file(dir.path(), L"keep.txt", "x"));

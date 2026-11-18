@@ -457,6 +457,28 @@ TEST_CASE("T-24/T-25: exclusive mutation lock with the ratified probe triple") {
     CHECK(reacquired.lock_id == lock.lock_id);
 }
 
+TEST_CASE("W1: journal leaves expose their identity digest (§20.4 v1)") {
+    Bootstrapped b("st-leaf-id"); bootstrap_fresh(b);
+    REQUIRE(b.storage.ok);
+    auto first = create_journal_leaf(b.storage, "journal-0001.jsonl");
+    REQUIRE(first.ok);
+    // The digest is the G15 convention v1: 64 lowercase hex characters.
+    REQUIRE(first.id_hex.size() == 64);
+    for (const char c : first.id_hex) {
+        const bool is_lowercase_hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        CHECK(is_lowercase_hex);
+    }
+    // The same file re-opened through the ratified read open carries the
+    // SAME digest (stable identity binding across handles and sessions).
+    auto read = open_journal_leaf_read(b.storage, "journal-0001.jsonl");
+    REQUIRE(read.ok);
+    CHECK(read.id_hex == first.id_hex);
+    // A different file carries a different digest.
+    auto second = create_journal_leaf(b.storage, "journal-0002.jsonl");
+    REQUIRE(second.ok);
+    CHECK(second.id_hex != first.id_hex);
+}
+
 TEST_CASE("T-28: lock_id continuity is verified against the recorded value") {
     Bootstrapped b("st-lock-id"); bootstrap_fresh(b);
     REQUIRE(b.storage.ok);

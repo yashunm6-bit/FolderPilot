@@ -161,6 +161,10 @@ bool storage_lock_id(const platform::SourceIdentity& identity, std::string& out_
     return true;
 }
 
+bool storage_leaf_id(const platform::SourceIdentity& identity, std::string& out_hex) {
+    return storage_lock_id(identity, out_hex);
+}
+
 bool derive_root_key(const std::string& volume_guid_path,
                      const platform::SourceIdentity& identity, std::string& out_hex) {
     if (volume_guid_path.empty()) {
@@ -510,8 +514,15 @@ StorageLeaf create_journal_leaf(const StorageRoot& root, std::string_view file_n
         out.error = gate.error;
         return out;
     }
+    std::string leaf_id;
+    if (!storage_leaf_id(opened.identity, leaf_id)) {
+        out.failure = StorageFailure::IdentityMismatch;
+        out.error = "the leaf identity could not be captured";
+        return out;
+    }
 
     out.ok = true;
+    out.id_hex = std::move(leaf_id);
     out.handle = platform::unique_handle{opened.handle.release()};
     out.created = opened.created;
     return out;
@@ -554,8 +565,15 @@ StorageLeaf open_journal_leaf_read(const StorageRoot& root,
         out.error = gate.error;
         return out;
     }
+    std::string leaf_id;
+    if (!storage_leaf_id(opened.identity, leaf_id)) {
+        out.failure = StorageFailure::IdentityMismatch;
+        out.error = "the leaf identity could not be captured";
+        return out;
+    }
 
     out.ok = true;
+    out.id_hex = std::move(leaf_id);
     out.handle = platform::unique_handle{opened.handle.release()};
     out.created = opened.created;
     return out;

@@ -107,6 +107,7 @@ void process_entry(ScanResult& result, const platform::RootDirectory& root,
     file.identity = std::move(inspection.identity);
     file.size_bytes = static_cast<unsigned long long>(inspection.size_bytes);
     file.last_write_time = inspection.last_write_time;
+    file.creation_time_filetime = inspection.creation_time_filetime;
     file.attributes = inspection.attributes.attributes;
     result.files.push_back(std::move(file));
 }

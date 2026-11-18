@@ -32,6 +32,7 @@ struct PlannedMove {
     std::string destination_name;         // final name inside the category folder
     unsigned long long size_bytes = 0;
     long long last_write_time = 0;        // Windows FILETIME (100ns units)
+    unsigned long long creation_time_filetime = 0;  // CreationTime fingerprint component (journal file_ctime)
 };
 
 // Outcome of inspecting one destination category directory.

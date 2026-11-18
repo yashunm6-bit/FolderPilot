@@ -762,6 +762,7 @@ SourceOpen open_source(HANDLE root_handle, std::string_view utf8_name) {
         return out;
     }
     out.last_write_time = basic.LastWriteTime.QuadPart;
+    out.creation_time_filetime = static_cast<unsigned long long>(basic.CreationTime.QuadPart);
 
     FILE_STANDARD_INFO standard{};
     if (!::GetFileInformationByHandleEx(handle.get(), FileStandardInfo, &standard, sizeof(standard))) {
@@ -797,6 +798,7 @@ SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name) 
     out.identity = opened.identity;
     out.size_bytes = opened.size_bytes;
     out.last_write_time = opened.last_write_time;
+    out.creation_time_filetime = opened.creation_time_filetime;
     return out; // opened's RAII handle closes here
 }
 

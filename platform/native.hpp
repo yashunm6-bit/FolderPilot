@@ -294,6 +294,7 @@ struct SourceInspection {
     SourceIdentity identity{};
     long long size_bytes = 0;
     long long last_write_time = 0;
+    unsigned long long creation_time_filetime = 0;  // FILE_BASIC_INFO.CreationTime (CreationTime, not ChangeTime)
 };
 
 SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name);
@@ -319,6 +320,7 @@ struct SourceOpen {
     SourceIdentity identity{};
     long long size_bytes = 0;
     long long last_write_time = 0;
+    unsigned long long creation_time_filetime = 0;  // FILE_BASIC_INFO.CreationTime (CreationTime, not ChangeTime)
 };
 SourceOpen open_source(HANDLE root_handle, std::string_view utf8_name);
 

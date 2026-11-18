@@ -100,6 +100,10 @@ bool storage_identity_material(const platform::SourceIdentity& identity,
 // convention is ratified as Decision E (2026-11-17).
 bool storage_lock_id(const platform::SourceIdentity& identity, std::string& out_hex);
 
+// The leaf identity digest (the journal_id / anchor_id source per §20.4):
+// the same G15 convention v1 applied to any storage leaf's captured identity.
+bool storage_leaf_id(const platform::SourceIdentity& identity, std::string& out_hex);
+
 // The root key: lowercase hex SHA-256 over UTF-8(volume GUID path) || 0x00 ||
 // the canonical identity material. 64 characters. `volume_guid_path` must be
 // non-empty (the volume GUID is ratified as part of the root identity).
@@ -189,6 +193,7 @@ struct StorageLeaf {
     unsigned long native_code = 0;
     platform::unique_handle handle;             // valid when ok
     bool created = false;
+    std::string id_hex;                         // identity digest of the leaf (G15 convention v1)
 };
 StorageLeaf create_journal_leaf(const StorageRoot& root, std::string_view file_name);
 
