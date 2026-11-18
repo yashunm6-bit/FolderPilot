@@ -514,4 +514,84 @@ CliRun run_folderpilot_cli(const std::vector<std::wstring>& arguments) {
     return run;
 }
 
+// ---------------------------------------------------------------------------
+// Cross-process test support.
+// ---------------------------------------------------------------------------
+
+bool spawn_process(const std::string& executable_utf8,
+                   const std::vector<std::string>& arguments_utf8,
+                   SpawnedProcess& out, unsigned long& last_error) {
+    out = SpawnedProcess{};
+    last_error = 0;
+
+    const auto exe_wide = folderpilot::platform::to_utf16(executable_utf8);
+    if (!exe_wide.ok) {
+        return false;
+    }
+
+    // Command line: individually quoted arguments in a WRITABLE buffer
+    // (CreateProcessW may modify it in place). Backslashes before a closing
+    // quote are doubled so a trailing-backslash argument survives the parse
+    // round-trip (the Phase 6.5 CLI lesson; sandbox paths here never end in
+    // one, but the quoting is exact regardless).
+    std::wstring command = L"\"" + exe_wide.value + L"\"";
+    for (const std::string& raw : arguments_utf8) {
+        const auto wide = folderpilot::platform::to_utf16(raw);
+        if (!wide.ok) {
+            return false;
+        }
+        std::wstring quoted = wide.value;
+        std::size_t trailing = 0;
+        while (trailing < quoted.size() &&
+               quoted[quoted.size() - 1 - trailing] == L'\\') {
+            ++trailing;
+        }
+        quoted.append(trailing, L'\\');
+        command += L" \"" + quoted + L"\"";
+    }
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    // bInheritHandles = FALSE: no handle - above all not the mutation lock -
+    // crosses into the child through inheritance.
+    const BOOL created = ::CreateProcessW(nullptr, command.data(), nullptr,
+                                          nullptr, FALSE, CREATE_NO_WINDOW,
+                                          nullptr, nullptr, &startup, &process);
+    if (created == 0) {
+        last_error = ::GetLastError();
+        return false;
+    }
+    ::CloseHandle(process.hThread);
+    out.process = process.hProcess;
+    return true;
+}
+
+bool wait_for_process_exit(HANDLE process, unsigned long timeout_ms) {
+    return process != nullptr &&
+           ::WaitForSingleObject(process, timeout_ms) == WAIT_OBJECT_0;
+}
+
+unsigned long process_exit_code(HANDLE process) {
+    DWORD code = 0;
+    if (process == nullptr || !::GetExitCodeProcess(process, &code)) {
+        return static_cast<unsigned long>(-1);
+    }
+    return code;
+}
+
+bool terminate_process(HANDLE process, unsigned long timeout_ms) {
+    if (process == nullptr || !::TerminateProcess(process, 1)) {
+        return false;
+    }
+    return ::WaitForSingleObject(process, timeout_ms) == WAIT_OBJECT_0;
+}
+
+void close_spawned_process(SpawnedProcess& process) {
+    if (process.process != nullptr) {
+        ::CloseHandle(process.process);
+        process.process = nullptr;
+    }
+}
+
 } // namespace fixture

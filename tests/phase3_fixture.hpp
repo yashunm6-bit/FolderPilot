@@ -13,6 +13,14 @@
 #include <vector>
 #include <string>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 namespace fixture {
 
 // RAII test directory: build/<sandbox>/<name>-<counter>.
@@ -96,5 +104,38 @@ struct CliRun {
     std::string output;
 };
 CliRun run_folderpilot_cli(const std::vector<std::wstring>& arguments);
+
+// ---------------------------------------------------------------------------
+// Cross-process test support (hosted-only suites). TEST CODE ONLY.
+// ---------------------------------------------------------------------------
+
+// A spawned child process. The handle is owned by the caller and must be
+// released with close_spawned_process().
+struct SpawnedProcess {
+    HANDLE process = nullptr;
+};
+
+// Spawns `executable_utf8` with individually quoted UTF-8 arguments (paths
+// containing spaces are safe). The child inherits NO handles: the mutation
+// lock must never cross processes through inheritance. Fails closed with
+// the Win32 error in last_error.
+bool spawn_process(const std::string& executable_utf8,
+                   const std::vector<std::string>& arguments_utf8,
+                   SpawnedProcess& out, unsigned long& last_error);
+
+// Bounded wait for process exit; true only when the process has exited
+// within the timeout.
+bool wait_for_process_exit(HANDLE process, unsigned long timeout_ms);
+
+// Exit code of an exited process (meaningful after wait_for_process_exit).
+unsigned long process_exit_code(HANDLE process);
+
+// Terminates the process and CONFIRMS termination through a bounded wait on
+// the process handle - only a signaled handle proves the kernel released
+// the child's handles. Returns false when termination was not confirmed.
+bool terminate_process(HANDLE process, unsigned long timeout_ms);
+
+// Releases the process handle (safe on a null handle).
+void close_spawned_process(SpawnedProcess& process);
 
 } // namespace fixture
