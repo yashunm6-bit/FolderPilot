@@ -130,6 +130,50 @@ execution completed with failures.
 
 ---
 
+## 13. The journal is data, never trusted without revalidation
+**IMPLEMENTED (Phase 7.2/7.3)**
+Every `--apply` run is journaled (write-ahead: RUN-START before the first
+move, INTENT flushed and anchored before its rename, RESULT flushed and
+anchored after it, RUN-END as the unanchored terminal). Journal records are
+evidence, not instructions: undo candidates are re-derived and revalidated
+against the live filesystem before every reverse move — the journal is never
+trusted without revalidation, and integrity hashes are not tamper protection.
+
+## 14. Undo preview is the default; undo execution requires explicit authorization
+**IMPLEMENTED (Phase 7.3/7.4)**
+`--undo` is a read-only preview (no lock, no journal writes, no renames —
+structurally incapable of mutation). Undo execution requires the explicit
+`--undo --apply` combination; without it the undo executor refuses before
+touching anything.
+
+## 15. No overwrite in either direction
+**IMPLEMENTED (Phases 5/7.3)**
+Forward moves use `ReplaceIfExists = FALSE` (the OS rejects an existing
+destination); undo reverse renames use the same no-replace mechanism against
+the original source slot — a refilled slot is an OS-enforced Conflict
+(R16: an unsafe repeated reversal is structurally impossible).
+
+## 16. Write-ahead durability: INTENT before mutation, RESULT after
+**IMPLEMENTED (Phase 7.2)**
+An INTENT is written and flushed (and its anchor record written and flushed)
+before the corresponding rename is permitted; the RESULT is written and
+flushed (and anchored) after the mutation. A durable-record failure stops the
+run per R1 — later moves are reported as not attempted, never as success.
+
+## 17. Journals, anchors and segments live outside the organized tree
+**IMPLEMENTED (Phase 7.1c)**
+Storage lives under `%LOCALAPPDATA%\FolderPilot\journals\<root-key>\`
+(handle-anchored, reparse-safe, ACL-validated) — never inside the organized
+tree, never scanned by FolderPilot, never deleted or rewritten (append-only).
+
+## 18. Coordinated journal/anchor rollback is accepted as undetectable (R25)
+**DISCLOSED (Phase 7, accepted limitation)**
+A coordinated rollback of the journal and anchor to a mutually consistent
+older prefix is undetectable; resurrected candidates fail safe on revalidation
+and the limitation is disclosed rather than hidden (§13 confounders, §15 R25).
+
+---
+
 **Claim discipline:** documentation, report output, and code comments must
 never claim stronger protection than the implemented mechanism provides.
 This document is itself subject to that rule — wording updates ride along

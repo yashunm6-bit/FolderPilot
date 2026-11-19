@@ -511,9 +511,9 @@ may be longer than the surviving files show".
 | Step | Content | Gate |
 |---|---|---|
 | 7.1 | Journal module (deep module, C++20): canonical serializer, SHA-256 via BCrypt with hosted link probe + known-answer test, bounds enforcement; pure unit tests. **7.1a done: probe landed in `dea0dc6`; G1 closed (run `43598561201`, §16). 7.1b done: journal core landed (`b52179c` + remediation through `bc520c2`), hosted CI green (run `43924678919`: Debug and Release 200/200 cases, 13,843/13,843 assertions)** **7.1c done: storage adapter landed (`2c252e5` + `c1d38d0` + `e98089f`), hosted CI green (run `44341177181`: Debug and Release each 225/225 cases, 14,112/14,112 assertions, zero failed/skipped; artifact SHA-256 verified byte-level; genuine cross-process lock tests pass locally and hosted)** | 7.1b report |
-| 7.2 | Forward-executor journal integration (write-ahead) + undo planning + reconciliation | Report |
-| 7.3 | Undo execution + undo report + exit codes | Report |
-| 7.4 | CLI surface (`--undo`, ack flag), reporter, **G5 wording + executor.hpp amendment + docs** | Report |
+| 7.2 | Forward-executor journal integration (write-ahead) + undo planning + reconciliation — **done: §20 ratified; W1 `a59a475`, W2+W3 `3c62891`, W4 `066d525`; D+R 243/243 (14,427 assertions); §20 contract review PASS after amendments (`570698c`)** | Report |
+| 7.3 | Undo execution + undo report + exit codes — **done: `9e1f7c9`; D+R 248/248 (14,539 assertions); T-52/T-53/T-58/T-48 analogues green** | Report |
+| 7.4 | CLI surface (`--undo`, ack flag), reporter, **G5 wording + executor.hpp amendment + docs** — **done: T-01..T-07 analogues green (255/255, 14,574 assertions); G5 docs landed (executor.hpp, SAFETY.md 13–18, ARCHITECTURE.md §12)** | Report |
 | 7.5 | Full local runtime verification (authorized SAC-off window) | Report |
 | 7.6 | Hosted CI evidence + closeout | Acceptance |
 

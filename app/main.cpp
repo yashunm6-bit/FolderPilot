@@ -44,13 +44,21 @@ int print_usage() {
     std::cout <<
         "Usage:\n"
         "  folderpilot <directory>           preview the organization plan (dry run)\n"
-        "  folderpilot <directory> --apply   execute the planned movements\n"
+        "  folderpilot <directory> --apply   execute the planned movements (journaled)\n"
+        "  folderpilot <directory> --undo    preview the undo plan (dry run)\n"
+        "  folderpilot <directory> --undo --apply\n"
+        "                                    execute the undo (restore moved files)\n"
+        "  folderpilot <directory> --apply --acknowledge-undo-window\n"
+        "                                    forward execute, superseding the live\n"
+        "                                    undo window (durably recorded)\n"
         "  folderpilot --help                show this help\n"
         "  folderpilot --version             show version information\n"
         "\n"
-        "The default operation is always a read-only dry run:\n"
-        "nothing is moved, created, or deleted.\n"
-        "File movement requires the explicit --apply flag.\n";
+        "The default operation is always a read-only dry run: nothing is moved,\n"
+        "created, or deleted. File movement requires the explicit --apply flag;\n"
+        "undo restores previously moved files and requires --undo --apply.\n"
+        "Every --apply run is journaled; --acknowledge-undo-window is only valid\n"
+        "with --apply (forward execution).\n";
     return 1;
 }
 

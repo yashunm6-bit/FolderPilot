@@ -46,7 +46,7 @@
 | Source revalidation + identity compare + volume guard per move | **IMPLEMENTED** (Phase 5) |
 | Handle-based no-overwrite movement (`FileRenameInformation` via `NtSetInformationFile`, ReplaceIfExists=FALSE) | **IMPLEMENTED** (Phase 5.1 native anchored rename, see §11) |
 | ExecutionResult + execution report (partial-failure semantics) | **IMPLEMENTED** (Phase 5) |
-| Undo, retries, recursive organization | PLANNED — NOT YET IMPLEMENTED (Phase 7+) |
+| Journal, storage, undo (Phase 7) | **IMPLEMENTED (7.1–7.4; retries/recursive = Phase 8)** |
 
 ## 2. Core model (approved)
 
@@ -286,6 +286,30 @@ Safety invariants and their wording constraints: see
   nuance: with explicit (non `-1`) source lengths, the size query and the
   conversion both return exactly the converted count — no terminator is
   appended or counted.
+
+## 12. Phase 7 implementation notes (IMPLEMENTED 7.1–7.4)
+
+- **Journal (7.1b)**: canonical JSONL records (RUN-START/INTENT/RESULT/RUN-END
+  forward; UNDO-START/INTENT/RESULT/END per attempt segment) with per-record
+  SHA-256 integrity and prev chaining — interior integrity/ordering only,
+  never tamper protection; strict parser (caps, transitions, correlation
+  rules); fail-closed reopened-state classification (§4.1/§6.3).
+- **Storage (7.1c)**: handle-anchored per-root chain under
+  `%LOCALAPPDATA%\FolderPilot\journals\<root-key>\` (root key = SHA-256 of
+  the volume-GUID path and the root directory's tagged identity); ACL
+  validation with ratified Decision A (absent and NULL DACLs refuse); the
+  exclusive mutation lock with the ratified probe triple; append-only leaves;
+  the 16 MiB per-file and 128 MiB aggregate quotas.
+- **Session (7.2)**: every `--apply` mutation is journaled write-ahead
+  (RUN-START → per-move INTENT-anchored-before-rename → RESULT-anchored →
+  RUN-END unanchored terminal); capacity admission before any file creation;
+  the preview path is structurally incapable of journal writes or renames.
+- **Undo (7.3/7.4)**: `--undo` previews (read-only), `--undo --apply`
+  executes reverse moves as a separate append-only attempt segment (G9,
+  unanchored) after §9.3 reconciliation; a live undo window refuses forward
+  apply unless superseded via `--apply --acknowledge-undo-window` (§9.5/§8).
+
+marker_guard = True
 
 ## 11. Phase 5 implementation notes (IMPLEMENTED) and OS finding
 

@@ -64,8 +64,14 @@ folderpilot --help | --version
 ```
 
 - **Dry run is the default and never modifies anything.** Movement happens
-  only with the explicit `--apply` flag. There is no `--force`, no undo,
-  and no background mode.
+  only with the explicit `--apply` flag. There is no `--force` and no
+  background mode.
+- **Undo (Phase 7)**: every `--apply` run is journaled; `--undo` previews
+  what would be restored (read-only), and `--undo --apply` moves the
+  journaled files back to their original locations (never overwriting — a
+  refilled slot is a reported Conflict). A live undo window refuses further
+  forward applies until superseded via `--apply --acknowledge-undo-window`
+  (durably recorded). Undo restores locations, never file contents.
 - Exit codes: `0` dry-run report printed / all moves completed · `1` usage
   error · `2` safety rejection (target refused, root changed, invalid plan)
   · `3` scan or planning failure / execution completed with failures.

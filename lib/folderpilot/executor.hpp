@@ -10,8 +10,12 @@
 //   * per-file movement is atomic; the batch is NOT transactional,
 //   * a failure on one file never aborts independent moves,
 //   * an existing destination is never overwritten (the OS rejects it),
-//   * the executor never invents destination names, never re-plans,
-//     never retries, never deletes, never rolls back.
+//   * within a single operation the executor never invents destination
+//     names, never re-plans, never retries, never deletes, never rolls back
+//     on its own; undo is a separate, explicitly user-invoked mode
+//     (--undo --apply) that performs fully revalidated reverse moves; the
+//     journal records outcomes but is never trusted without revalidation
+//     (Phase 7.2/7.3; docs/PHASE7-DESIGN.md §17 G5 amendment).
 
 #pragma once
 

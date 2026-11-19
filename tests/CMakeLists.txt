@@ -24,6 +24,7 @@ add_executable(folderpilot_tests
     unit/test_journal_chain.cpp
     unit/test_journal_session.cpp
     unit/test_storage.cpp
+    unit/test_undo_cli.cpp
     unit/test_undo_execute.cpp
     unit/test_undo_plan.cpp
 )
