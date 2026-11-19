@@ -514,6 +514,14 @@ may be longer than the surviving files show".
 | 7.2 | Forward-executor journal integration (write-ahead) + undo planning + reconciliation — **done: §20 ratified; W1 `a59a475`, W2+W3 `3c62891`, W4 `066d525`; D+R 243/243 (14,427 assertions); §20 contract review PASS after amendments (`570698c`)** | Report |
 | 7.3 | Undo execution + undo report + exit codes — **done: `9e1f7c9`; D+R 248/248 (14,539 assertions); T-52/T-53/T-58/T-48 analogues green** | Report |
 | 7.4 | CLI surface (`--undo`, ack flag), reporter, **G5 wording + executor.hpp amendment + docs** — **done: T-01..T-07 analogues green (255/255, 14,574 assertions); G5 docs landed (executor.hpp, SAFETY.md 13–18, ARCHITECTURE.md §12)** | Report |
+| 7.5 | Full local runtime verification (authorized SAC-off window) — **done: SAC permanently off by owner decision; local D+R 255/255 cases, 14,574/14,574 assertions, zero failed/skipped/warnings on `f237f70` (2026-11-19), covering the journaled forward path, undo preview/execution, reconciliation classes, cross-process lock contention, and the CLI spawn suites** | Report |
+| 7.6 | Hosted CI evidence + closeout — **done: hosted runs #16 (`fc52ddf`), #17 (`570698c`), #18 (`a59a475`), #19 (`3c62891`), #20 (`066d525`), #21 (`9e1f7c9`), #22 (`f237f70`) all success (each verified `head_sha` == source commit); the `folderpilot-test-logs` artifact digests verified byte-level at 7.1c and the same CI pipeline carried forward** | Acceptance |
+
+**Phase 7 COMPLETE (2026-11-19): the ratified Move Journal & Undo contract
+(§1–§19) is implemented, locally runtime-verified and hosted-verified through
+`f237f70`. Deferred to Phase 8 by the ratified scope: recursive organization
+and retry handling. Deferred permanently by design: selective/partial undo,
+chained multi-run undo, external checkpoint subsystems, `--recover`.**
 | 7.5 | Full local runtime verification (authorized SAC-off window) | Report |
 | 7.6 | Hosted CI evidence + closeout | Acceptance |
 
