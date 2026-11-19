@@ -10,6 +10,8 @@
 
 #include "folderpilot/executor.hpp"
 #include "folderpilot/organization_plan.hpp"
+#include "folderpilot/undo_execute.hpp"
+#include "folderpilot/undo_plan.hpp"
 
 namespace folderpilot {
 
@@ -17,6 +19,11 @@ namespace folderpilot {
 // (ASCII arrow "->" is used on purpose: console encoding is finalized in a
 // later phase, and the report must never depend on it.)
 std::string render_dry_run_report(const OrganizationPlan& plan);
+
+// Phase 7.3: undo reporting (preview and execution). Both are render-only.
+std::string render_undo_preview(const UndoPlanResult& plan);
+std::string render_undo_execution(const UndoPlanResult& plan,
+                                  const UndoExecutionResult& result);
 
 // Renders the execution report for a completed (or aborted) run. Consumes
 // the immutable plan and the separate ExecutionResult; states clearly that

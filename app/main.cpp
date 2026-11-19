@@ -81,6 +81,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     std::string directory;
     bool apply = false;
+    bool undo = false;
     bool acknowledge_undo_window = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
@@ -95,6 +96,10 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (arg == "--apply") {
             apply = true;
+            continue;
+        }
+        if (arg == "--undo") {
+            undo = true;
             continue;
         }
         if (arg == "--acknowledge-undo-window") {
@@ -118,9 +123,11 @@ int wmain(int argc, wchar_t* argv[]) {
         return print_usage();
     }
     // Ratified §2 grammar: the acknowledgement option is restricted to
-    // forward execution; without --apply it is a usage error (exit 1).
-    if (acknowledge_undo_window && !apply) {
-        std::cout << "--acknowledge-undo-window requires --apply\n";
+    // forward execution; with --undo or without --apply it is a usage error
+    // (exit 1).
+    if (acknowledge_undo_window && (!apply || undo)) {
+        std::cout << "--acknowledge-undo-window is only valid with --apply "
+                     "(forward execution)\n";
         return print_usage();
     }
 
@@ -129,6 +136,36 @@ int wmain(int argc, wchar_t* argv[]) {
     if (!guard.ok) {
         std::cout << "Target rejected: " << guard.error << "\n";
         return 2;
+    }
+
+    const auto storage_base = folderpilot::platform::local_app_data_path();
+    if (!storage_base.ok) {
+        std::cout << "Storage base unavailable: " << storage_base.error << "\n";
+        return 3;
+    }
+
+    if (undo) {
+        // Undo mode (§2): the preview is the default; mutation requires the
+        // explicit --apply. The preview is read-only (no lock, no writes).
+        const auto undo_plan =
+            folderpilot::load_undo_plan(storage_base.path_utf8, guard.root);
+        if (!apply) {
+            std::cout << folderpilot::render_undo_preview(undo_plan);
+            return undo_plan.ok ? 0 : 3;
+        }
+        const auto result = folderpilot::execute_undo(
+            undo_plan, storage_base.path_utf8, guard.root, true);
+        std::cout << folderpilot::render_undo_execution(undo_plan, result);
+        if (result.aborted) {
+            return result.abort_exit_code;
+        }
+        if (result.segment_stopped) {
+            return 3;
+        }
+        return (result.restored_count == result.eligible_count &&
+                result.conflict_count == 0 && result.failed_count == 0)
+                   ? 0
+                   : 3;
     }
 
     // 2. Scan the immediate files (handle-anchored, non-recursive).
@@ -154,11 +191,6 @@ int wmain(int argc, wchar_t* argv[]) {
     // 4b. Explicitly authorized execution against the validated root. Every
     // mutation is journaled through the Phase 7.2 write-ahead session
     // (storage base: the %LOCALAPPDATA% analogue).
-    const auto storage_base = folderpilot::platform::local_app_data_path();
-    if (!storage_base.ok) {
-        std::cout << "Storage base unavailable: " << storage_base.error << "\n";
-        return 3;
-    }
     const auto result = folderpilot::execute_plan(
         plan, directory, storage_base.path_utf8, acknowledge_undo_window);
     std::cout << folderpilot::render_execution_report(plan, result);

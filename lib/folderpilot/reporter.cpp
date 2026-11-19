@@ -5,6 +5,8 @@
 #include <sstream>
 
 #include "folderpilot/executor.hpp"
+#include "folderpilot/undo_execute.hpp"
+#include "folderpilot/undo_plan.hpp"
 
 namespace folderpilot {
 
@@ -179,6 +181,96 @@ std::string render_execution_report(const OrganizationPlan& plan,
     }
     out << "Batch execution is not transactional: each file movement is atomic,\n"
            "partial progress is possible, and undo is not available.\n";
+    return out.str();
+}
+
+
+// ---------------------------------------------------------------------------
+// Phase 7.3: undo reporting (render-only; the undo paths never mutate here).
+// ---------------------------------------------------------------------------
+
+std::string render_undo_preview(const UndoPlanResult& plan) {
+    std::ostringstream out;
+    out << "UNDO PREVIEW\n";
+    if (!plan.ok) {
+        out << "  storage could not be read: " << plan.error << "\n";
+        return out.str();
+    }
+    switch (plan.fold.state) {
+        case ForwardChainState::Closed:
+            out << "  newest run: complete\n"; break;
+        case ForwardChainState::CompleteUnterminated:
+            out << "  newest run: complete (journal end not flushed)\n"; break;
+        case ForwardChainState::PartialUnambiguous:
+            out << "  newest run: interrupted after completed moves\n"; break;
+        case ForwardChainState::DeclaredInert:
+            out << "  newest run: recorded no moves (nothing to undo)\n"; break;
+        case ForwardChainState::AbandonedForwardInit:
+            out << "  newest run: abandoned initialization (nothing to undo)\n"; break;
+        case ForwardChainState::Blocked:
+            out << "  newest run: BLOCKED - " << plan.fold.detail << "\n";
+            out << "  undo is not available; the evidence is read-only\n";
+            return out.str();
+    }
+    if (plan.fold.durability_caveat) {
+        out << "  durability caveat: parts of the journal were not flush-confirmed\n";
+    }
+    if (plan.fold.candidates.empty()) {
+        out << "  nothing to undo\n";
+        return out.str();
+    }
+    out << "  undo candidates:\n";
+    for (const auto& c : plan.fold.candidates) {
+        out << "    move " << c.move_id << ": " << c.source_name << " (from "
+            << category_name(c.dest_cat) << " as " << c.dest_name << ") - ";
+        switch (c.classification) {
+            case UndoCandidateClass::Undoable:        out << "undoable"; break;
+            case UndoCandidateClass::AlreadyReversed: out << "already reversed"; break;
+            case UndoCandidateClass::Conflict:        out << "CONFLICT (source slot refilled)"; break;
+            case UndoCandidateClass::Missing:         out << "MISSING"; break;
+            case UndoCandidateClass::Replaced:        out << "REPLACED (identity mismatch)"; break;
+            case UndoCandidateClass::Ambiguous:       out << "AMBIGUOUS"; break;
+            case UndoCandidateClass::Blocked:         out << "BLOCKED"; break;
+            case UndoCandidateClass::Corrupt:         out << "CORRUPT"; break;
+        }
+        out << " - " << c.detail << "\n";
+    }
+    return out.str();
+}
+
+std::string render_undo_execution(const UndoPlanResult& plan,
+                                  const UndoExecutionResult& result) {
+    std::ostringstream out;
+    out << "UNDO EXECUTION (run " << plan.root_run_seq << ")\n";
+    if (result.aborted) {
+        out << "  refused before any change: " << result.abort_reason << "\n";
+        return out.str();
+    }
+    out << "  segment: " << (result.segment_active ? "created" : "not created") << "\n";
+    out << "  restored: " << result.restored_count << " of " << result.eligible_count
+        << " eligible\n";
+    if (result.conflict_count != 0) {
+        out << "  conflicts: " << result.conflict_count << "\n";
+    }
+    if (result.failed_count != 0) {
+        out << "  failures: " << result.failed_count << "\n";
+    }
+    if (result.refused_count != 0) {
+        out << "  refused (not journaled): " << result.refused_count << "\n";
+    }
+    for (const auto& r : result.records) {
+        out << "    move " << r.move_id << ": " << r.source_name << " <- "
+            << r.dest_name << " : " << r.outcome
+            << (r.journaled ? "" : " (not journaled)") << "\n";
+    }
+    if (result.segment_stopped) {
+        out << "  SEGMENT STOPPED: " << result.segment_error << "\n";
+        out << "  the undo is partial; the durable state is classified per the "
+               "journal contract\n";
+    } else if (result.restored_count != result.eligible_count ||
+               result.conflict_count != 0 || result.failed_count != 0) {
+        out << "  partial undo completed\n";
+    }
     return out.str();
 }
 
