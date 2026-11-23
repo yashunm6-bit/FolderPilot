@@ -128,6 +128,10 @@ TEST_CASE("executor moves unicode, compound, dotfile and extensionless names") {
     REQUIRE(fx.plan.planned_count() == 4);
 
     const auto result = execute_plan(fx.plan, fx.dir.u8(), fx.storage.u8(), false);
+    for (const auto& r : result.records) {
+        INFO("record: " << r.source_name << " outcome=" << static_cast<int>(r.outcome)
+             << " detail=" << r.detail);
+    }
     CHECK(result.moved_count == 4);
     CHECK(std::filesystem::exists(fx.dir.path() / L"Documents" / L"\x6587\x4EF6.txt"));
     CHECK(std::filesystem::exists(fx.dir.path() / L"Archives" / L"backup.tar.gz"));
@@ -389,12 +393,22 @@ TEST_CASE("rename primitive rejects invalid destination components up front") {
     auto category = platform::open_category_directory(fx.guard.root.get(), "Documents", false);
     REQUIRE(category.ok);
 
-    const std::string bad_names[] = {"", ".", "..", "a\\b.pdf", "a/b.pdf", "a:b.pdf",
+    const std::string bad_names[] = {"", ".", "..", "a/b.pdf", "a:b.pdf",
                                      "..\\x.pdf", std::string(256, 'x')};
     for (const std::string& bad : bad_names) {
         const auto r = platform::rename_to_category(source, category.handle.get(), bad);
         CHECK_FALSE(r.ok);
         CHECK(r.failure == platform::NativeFailure::InvalidPath);
+    }
+    // Phase 8 (docs/PHASE8-DESIGN.md section 1.3): a multi-component target
+    // is a legal relative path now - its safety comes from the gated
+    // intermediate walk, which reports the missing directory instead of
+    // creating one.
+    {
+        const auto r = platform::rename_to_category(source, category.handle.get(),
+                                                    "a\\b.pdf");
+        CHECK_FALSE(r.ok);
+        CHECK(r.failure == platform::NativeFailure::ConfirmedNotFound);
     }
     // The source is untouched after all refusals.
     CHECK(std::filesystem::exists(fx.dir.path() / L"doc.pdf"));

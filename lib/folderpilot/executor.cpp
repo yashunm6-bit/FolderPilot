@@ -3,6 +3,7 @@
 #include "folderpilot/executor.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -96,7 +97,7 @@ ExecutionResult execute_plan(const OrganizationPlan& plan,
     {
         auto opened = JournalSession::open_for_run(
             storage_base_path, root, plan.planned_count(),
-            undo_window_acknowledged, 0);
+            undo_window_acknowledged);
         if (!opened.ok) {
             result.aborted = true;
             result.abort_reason = "journal session refused: " + opened.error;
@@ -104,7 +105,10 @@ ExecutionResult execute_plan(const OrganizationPlan& plan,
                 (opened.failure == JournalSessionFailure::CapacityExhausted ||
                  opened.failure == JournalSessionFailure::SequenceOverflow ||
                  opened.failure == JournalSessionFailure::LeafCreation ||
-                 opened.failure == JournalSessionFailure::AnchorCreation)
+                 opened.failure == JournalSessionFailure::AnchorCreation ||
+                 // A storage leaf READ failure is operational (exit 3), not a
+                 // chain refusal (§20.6); the retry preview maps it the same way.
+                 opened.failure == JournalSessionFailure::StorageRead)
                     ? 3
                     : 2;
             return result;
@@ -343,7 +347,7 @@ ExecutionResult execute_plan(const OrganizationPlan& plan,
 
         // Open the source relative to the retained root; the handle stays
         // open until the rename completes and closes via RAII.
-        auto source = platform::open_source(root.get(), move.source_name);
+        auto source = platform::open_source_at(root.get(), move.source_name);
         if (!source.ok) {
             MoveOutcome outcome = MoveOutcome::Failed;
             switch (source.failure) {

@@ -267,6 +267,29 @@ TEST_CASE("planner fails closed for an invalid scan result") {
     CHECK(plan.error().find("scan failed") != std::string::npos);
 }
 
+TEST_CASE("planner refuses the whole plan when a source name cannot be journaled") {
+    fixture::SandboxDir dir{"plan-badsource"};
+    REQUIRE(fixture::create_file(dir.path(), L"ok.pdf", "ok"));
+    const auto guard = validate_target(dir.u8());
+    REQUIRE(guard.ok);
+    auto scan = scan_directory(guard.root);
+    REQUIRE(scan.enumeration == EnumerationStatus::Ok);
+    REQUIRE(scan.files.size() == 1);
+
+    // A nested name with a quote is illegal in the journal's canonical
+    // source_name; the planner must refuse BEFORE any mutation starts, not
+    // skip it and publish a partial plan (PHASE8-DESIGN §2).
+    ScannedFile bad;
+    bad.name_utf8 = "sub\\bad\"name.txt";
+    bad.identity = platform::SourceIdentityEx{2, {}};
+    scan.files.push_back(bad);
+
+    const auto plan = build_plan(guard.root, scan);
+    CHECK_FALSE(plan.valid());
+    CHECK(plan.error().find("not journalable") != std::string::npos);
+    CHECK(plan.moves().empty());
+}
+
 TEST_CASE("planning is deterministic across repeated runs") {
     fixture::SandboxDir dir{"plan-deterministic"};
     REQUIRE(fixture::create_file(dir.path(), L"resume.pdf", "1"));

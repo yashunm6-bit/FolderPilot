@@ -34,7 +34,11 @@
 #include "folderpilot/path_guard.hpp"
 #include "folderpilot/planner.hpp"
 #include "folderpilot/reporter.hpp"
+#include "folderpilot/retry_plan.hpp"
 #include "folderpilot/scanner.hpp"
+#include "folderpilot/storage_adapter.hpp"
+#include "folderpilot/undo_plan.hpp"
+#include "folderpilot/undo_execute.hpp"
 #include "storage.hpp"
 #include "text.hpp"
 
@@ -51,6 +55,11 @@ int print_usage() {
         "  folderpilot <directory> --apply --acknowledge-undo-window\n"
         "                                    forward execute, superseding the live\n"
         "                                    undo window (durably recorded)\n"
+        "  folderpilot <directory> --recursive [--apply]\n"
+        "                                    organize files in subdirectories too\n"
+        "  folderpilot <directory> --retry [--apply]\n"
+        "                                    re-attempt locked/denied moves from\n"
+        "                                    the newest journaled run\n"
         "  folderpilot --help                show this help\n"
         "  folderpilot --version             show version information\n"
         "\n"
@@ -58,7 +67,7 @@ int print_usage() {
         "created, or deleted. File movement requires the explicit --apply flag;\n"
         "undo restores previously moved files and requires --undo --apply.\n"
         "Every --apply run is journaled; --acknowledge-undo-window is only valid\n"
-        "with --apply (forward execution).\n";
+        "with --apply or --retry --apply (forward execution).\n";
     return 1;
 }
 
@@ -90,6 +99,8 @@ int wmain(int argc, wchar_t* argv[]) {
     std::string directory;
     bool apply = false;
     bool undo = false;
+    bool recursive = false;
+    bool retry = false;
     bool acknowledge_undo_window = false;
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
@@ -108,6 +119,14 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         if (arg == "--undo") {
             undo = true;
+            continue;
+        }
+        if (arg == "--recursive") {
+            recursive = true;
+            continue;
+        }
+        if (arg == "--retry") {
+            retry = true;
             continue;
         }
         if (arg == "--acknowledge-undo-window") {
@@ -130,12 +149,25 @@ int wmain(int argc, wchar_t* argv[]) {
     if (directory.empty()) {
         return print_usage();
     }
-    // Ratified §2 grammar: the acknowledgement option is restricted to
-    // forward execution; with --undo or without --apply it is a usage error
-    // (exit 1).
-    if (acknowledge_undo_window && (!apply || undo)) {
-        std::cout << "--acknowledge-undo-window is only valid with --apply "
-                     "(forward execution)\n";
+    // Ratified §2 grammar (Phase 8 amendment): the acknowledgement option is
+    // restricted to an actual forward EXECUTION - --apply or --retry --apply
+    // (a retry apply supersedes a live window only through the same ratified
+    // acknowledgement). A read-only preview (including --retry alone), --undo
+    // or a dry run is a usage error (exit 1).
+    if (acknowledge_undo_window && (undo || !apply)) {
+        std::cout << "--acknowledge-undo-window is only valid with --apply or "
+                     "--retry --apply (forward execution)\n";
+        return print_usage();
+    }
+    // Ratified Phase 8 grammar: --recursive is forward-only; --retry is
+    // forward-only and mutually exclusive with --recursive/--undo (a retry
+    // is itself a forward run).
+    if (recursive && (undo || retry)) {
+        std::cout << "--recursive cannot be combined with --undo or --retry\n";
+        return print_usage();
+    }
+    if (retry && (undo || recursive)) {
+        std::cout << "--retry cannot be combined with --undo or --recursive\n";
         return print_usage();
     }
 
@@ -150,6 +182,108 @@ int wmain(int argc, wchar_t* argv[]) {
     if (!storage_base.ok) {
         std::cout << "Storage base unavailable: " << storage_base.error << "\n";
         return 3;
+    }
+
+    folderpilot::ScanOptions scan_options;
+    scan_options.recursive = recursive;
+    if (retry) {
+        // Retry mode (§1.4): the preview lists the retryable candidates with
+        // their fresh preflight results; --retry --apply executes a fresh
+        // fully-journaled run over exactly the preflighted files, under the
+        // SAME ratified §9.5 live-undo-window gate as every other forward
+        // apply (a live window requires --acknowledge-undo-window).
+        const auto retry_plan =
+            folderpilot::load_retry_plan(storage_base.path_utf8, guard.root);
+        if (!retry_plan.ok) {
+            std::cout << "Retry planning failed: " << retry_plan.error << "\n";
+            return 3;
+        }
+        if (retry_plan.busy) {
+            std::cout << "Retry unavailable: " << retry_plan.blocked_detail << "\n";
+            return 2;
+        }
+        if (retry_plan.blocked) {
+            std::cout << "The newest journal is blocked: " << retry_plan.blocked_detail
+                      << "\n";
+            return 2;
+        }
+        if (!apply) {
+            std::cout << "RETRY PREVIEW\n";
+            if (retry_plan.candidates.empty()) {
+                std::cout << "  nothing to retry\n";
+                return 0;
+            }
+            for (const auto& c : retry_plan.candidates) {
+                std::cout << "  move " << c.move_id << ": " << c.source_name
+                          << " (recorded " << journal_outcome_name(c.recorded_outcome)
+                          << ") - "
+                          << (c.preflight_ok
+                                  ? std::string("retryable")
+                                  : std::string("NOT retryable: ") + c.preflight_detail)
+                          << "\n";
+            }
+            if (retry_plan.not_retryable != 0) {
+                std::cout << "  not retryable (permanent/identity/completed): "
+                          << retry_plan.not_retryable << "\n";
+            }
+            if (retry_plan.preflight_failed != 0) {
+                std::cout << "  failed preflight: " << retry_plan.preflight_failed
+                          << "\n";
+            }
+            return 0;
+        }
+        // Retry apply: a fresh scan filtered to the preflighted candidates
+        // (identity digest AND creation time must match), planned and
+        // executed as a fresh fully-journaled run. The scan is RECURSIVE:
+        // candidates recorded by a --recursive run carry nested relative
+        // paths no flat scan can match.
+        folderpilot::ScanOptions retry_scan_options;
+        retry_scan_options.recursive = true;
+        const auto scan = folderpilot::scan_directory(guard.root, retry_scan_options);
+        if (scan.enumeration != folderpilot::EnumerationStatus::Ok) {
+            std::cout << "Scan failed: " << scan.error << "\n";
+            return 3;
+        }
+        folderpilot::ScanResult filtered;
+        filtered.enumeration = folderpilot::EnumerationStatus::Ok;
+        filtered.root = scan.root;
+        std::size_t matched = 0;
+        for (auto& file : scan.files) {
+            for (const auto& c : retry_plan.candidates) {
+                if (!c.preflight_ok) {
+                    continue;
+                }
+                std::string live_digest;
+                if (file.name_utf8 == c.source_name &&
+                    folderpilot::storage_leaf_id(file.identity, live_digest) &&
+                    live_digest == c.file_id_hex &&
+                    file.creation_time_filetime == c.file_ctime_filetime) {
+                    filtered.files.push_back(std::move(file));
+                    ++matched;
+                    break; // matched: stop comparing candidates for this file
+                }
+            }
+        }
+        (void)matched;
+        if (filtered.files.empty()) {
+            std::cout << "Nothing to retry\n";
+            return 0;
+        }
+        const auto plan = folderpilot::build_plan(guard.root, filtered);
+        if (!plan.valid()) {
+            std::cout << "Planning failed: " << plan.error() << "\n";
+            return 2;
+        }
+        const auto result = folderpilot::execute_plan(
+            plan, directory, storage_base.path_utf8, acknowledge_undo_window);
+        std::cout << folderpilot::render_execution_report(plan, result);
+        if (result.aborted) {
+            return result.abort_exit_code;
+        }
+        if (result.journal_stopped) {
+            return 3;
+        }
+        return result.all_moved() ? 0 : 3;
     }
 
     if (undo) {
@@ -176,8 +310,8 @@ int wmain(int argc, wchar_t* argv[]) {
                    : 3;
     }
 
-    // 2. Scan the immediate files (handle-anchored, non-recursive).
-    const auto scan = folderpilot::scan_directory(guard.root);
+    // 2. Scan (handle-anchored; recursive per --recursive).
+    const auto scan = folderpilot::scan_directory(guard.root, scan_options);
     if (scan.enumeration != folderpilot::EnumerationStatus::Ok) {
         std::cout << "Scan failed: " << scan.error << "\n";
         return 3;

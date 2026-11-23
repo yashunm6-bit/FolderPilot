@@ -1,22 +1,28 @@
 # FolderPilot — Architecture
 
-> **Implementation status: Phase 6 (hardening, tests and documentation)
-> complete.**
+> **Implementation status: Phase 8 (recursive organization and retry)
+> implemented and locally verified; Phases 1–7 complete.**
 > This document records the architecture approved in Engineering Plan v2.5
 > (plus the ratified directory-enumeration mechanism). Only items marked
 > **IMPLEMENTED** exist in code today. Everything else is **PLANNED — NOT YET
-> IMPLEMENTED**. FolderPilot can validate a target, scan it, classify the
-> files, plan the organization, print a read-only dry-run report, and — with
-> the explicit `--apply` flag — execute the planned movements through
-> validated handles with OS-enforced no-overwrite semantics. Undo, retries,
-> and recursive organization remain out of scope. The Phase 6 state is
-> locally runtime-verified in both configurations — 144/144 test cases,
-> 1,762/1,762 assertions each, zero failed, zero skipped (Debug and
-> Release) — and hosted-verified at the workflow/job/CTest-step level
-> (GitHub Actions run 43052752854, push to main, commit 7f4a9db,
-> windows-latest runner with MSYS2 UCRT64; its exact hosted test counts
-> are not verifiable — the run has no log artifact — see
-> docs/PHASE6-CLOSEOUT.md §3–§4).
+> IMPLEMENTED**. FolderPilot can validate a target, scan it (flat by default,
+> or depth-capped recursive with opt-in `--recursive`), classify the files,
+> plan the organization, print a read-only dry-run report, and — with the
+> explicit `--apply` flag — execute the planned movements through validated
+> handles with OS-enforced no-overwrite semantics. Every `--apply` run is
+> journaled and reversible with `--undo`; `--retry` re-attempts locked/denied
+> moves from the newest journal. There is no deletion, no overwriting, and no
+> path-based rename fallback. The current Phase 8 state is locally
+> runtime-verified in both configurations — 279 test cases, 14,893 assertions
+> each, zero failed, zero skipped, zero warnings (Debug and Release). The
+> latest verified hosted run is `44341177181` (Phase 7.1c storage adapter;
+> commit e98089f, windows-latest runner with MSYS2 UCRT64; 225/225 cases,
+> 14,112/14,112 assertions, zero failed/skipped, artifact SHA-256 verified
+> byte-level — see docs/PHASE7-DESIGN.md §16). The earlier Phase 6 run
+> `43052752854` (commit 7f4a9db) succeeded at the workflow/job/CTest-step
+> level but uploaded no log artifact, so its exact hosted test counts are not
+> verifiable (docs/PHASE6-CLOSEOUT.md §3–§4). No hosted Phase 8 run has been
+> verified yet.
 
 ---
 
@@ -33,20 +39,20 @@
 | Platform text utilities: strict UTF-8 / UTF-16 conversion | **IMPLEMENTED** (Phase 2) |
 | PathGuard: target validation, attribute gates, component-aware denylist | **IMPLEMENTED** (Phase 3) |
 | Root bootstrap: single path-based `NtCreateFile` open, RAII handle, resolved path, identity, volume GUID | **IMPLEMENTED** (Phase 3) |
-| Directory scanner: handle-anchored enumeration, non-recursive, structured skip reasons | **IMPLEMENTED** (Phase 3) |
+| Directory scanner: handle-anchored enumeration, non-recursive by default (Phase 8 adds opt-in `--recursive` depth-capped DFS), structured skip reasons | **IMPLEMENTED** (Phase 3; `--recursive` in Phase 8) |
 | Source identity capture from opened handles (`FileIdInfo` + separate legacy fallback) | **IMPLEMENTED** (Phase 3) |
 | Platform layer: native file handling (`NtCreateFile`, runtime-resolved ntdll functions) | **IMPLEMENTED** (Phase 3, bootstrap + source opens) |
 | Destination category inspection (root-relative, read-only, snapshot of existing names) | **IMPLEMENTED** (Phase 4) |
 | Collision resolution during planning (reserved natural names, bounded suffixes) | **IMPLEMENTED** (Phase 4) |
 | Immutable `OrganizationPlan` with validated invariants | **IMPLEMENTED** (Phase 4) |
 | Dry-run Reporter (render-only, no filesystem access) | **IMPLEMENTED** (Phase 4) |
-| Read-only CLI (`folderpilot <dir>`, `--help`, `--version`; `--apply` explicitly rejected) | **IMPLEMENTED** (Phase 4) |
+| Read-only CLI (`folderpilot <dir>`, `--help`, `--version`; `--apply` explicitly rejected) | **IMPLEMENTED** (Phase 4 read-only form; superseded by Phase 5 `--apply`, which executes the plan — dry run remains the default) |
 | Root revalidation (identity/path/volume) before any mutation | **IMPLEMENTED** (Phase 5) |
 | Category revalidation + root-relative category creation (`FILE_CREATE`) | **IMPLEMENTED** (Phase 5) |
 | Source revalidation + identity compare + volume guard per move | **IMPLEMENTED** (Phase 5) |
 | Handle-based no-overwrite movement (`FileRenameInformation` via `NtSetInformationFile`, ReplaceIfExists=FALSE) | **IMPLEMENTED** (Phase 5.1 native anchored rename, see §11) |
 | ExecutionResult + execution report (partial-failure semantics) | **IMPLEMENTED** (Phase 5) |
-| Journal, storage, undo (Phase 7) | **IMPLEMENTED (7.1–7.4; retries/recursive = Phase 8)** |
+| Journal, storage, undo (Phase 7) | **IMPLEMENTED** (7.1–7.6); retries and recursive organization **IMPLEMENTED** (Phase 8) |
 
 ## 2. Core model (approved)
 
@@ -133,6 +139,16 @@ Safety invariants and their wording constraints: see
   (pure invariants + sandboxed planning), `test_reporter` (render-only),
   `test_cli` (spawns the real executable; read-only dry-run immutability,
   `--apply` movement, exit codes).
+- Phase 5–8 suites: `test_handle` and `test_executor` (RAII handles, error
+  taxonomy, journaled safe movement), `test_cli5` (spawned `--apply` CLI),
+  `test_journal`, `test_journal_chain`, and `test_journal_session`
+  (canonical JSONL records, integrity/chaining, parser, write-ahead session),
+  `test_storage` (handle-anchored chain, ACL/lock/quota policy), `test_sha256`
+  (BCrypt provider + FIPS vectors), `test_undo_plan`, `test_undo_execute`, and
+  `test_undo_cli` (reconciliation, reverse moves, CLI), `test_recursive`
+  (DFS traversal, containment, depth/entry caps, nested collisions), and
+  `test_retry` (taxonomy, fresh preflight, fingerprint mismatch,
+  fresh-journal invariant).
 - Filesystem fixtures live exclusively under the synthetic sandboxes
   `build/phase3-test-sandbox/` (read-only phase fixtures) and
   `build/phase5-test-sandbox/` (movement fixtures) — never `%TEMP%`, never
@@ -152,6 +168,8 @@ Safety invariants and their wording constraints: see
 | 4 | Planner and dry-run | **IMPLEMENTED** |
 | 5 | Safe executor | **IMPLEMENTED** (native anchored rename, see §11) |
 | 6 | Hardening, tests and documentation | **COMPLETE** |
+| 7 | Journal, storage, undo | **IMPLEMENTED** (7.1–7.6) |
+| 8 | Recursive organization, retry | **IMPLEMENTED** |
 
 ## 10. Phase 4 implementation notes (IMPLEMENTED)
 
@@ -193,7 +211,8 @@ Safety invariants and their wording constraints: see
 - **CLI exit codes** (per `app/main.cpp`): 0 dry-run report printed, or
   execution completed with all moves done · 1 usage error · 2 target
   rejected, root changed (batch aborted before any mutation), or invalid
-  plan · 3 scan or planning failure, or execution completed with failures.
+  plan · 3 operational failure (scan/planning, journal storage I/O), or
+  execution completed with failures.
 - **Unicode CLI (Phase 6)**: arguments arrive through the UTF-16 (`wmain`,
   `-municode`) entry point and are converted with the same strict
   UTF-16→UTF-8 converter the library uses, so non-ASCII directory paths
@@ -236,7 +255,8 @@ Safety invariants and their wording constraints: see
   continuation queries; MS-FSA's zero-match initial-query status
   (`STATUS_NO_SUCH_FILE` → `ERROR_FILE_NOT_FOUND`) fails closed rather
   than being adopted as an empty result (contract in `platform/native.hpp`).
-- **Scanner**: non-recursive; `.`/`..`, directories, reparse points
+- **Scanner**: non-recursive by default (Phase 8 adds opt-in `--recursive`
+  depth-capped DFS — see §13); `.`/`..`, directories, reparse points
   (any tag), hidden, and system entries are skipped with structured reasons
   before any open; candidates are opened relative to the root handle
   (`DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE`, share R|W, no
@@ -287,7 +307,7 @@ Safety invariants and their wording constraints: see
   conversion both return exactly the converted count — no terminator is
   appended or counted.
 
-## 12. Phase 7 implementation notes (IMPLEMENTED 7.1–7.4)
+## 12. Phase 7 implementation notes (IMPLEMENTED 7.1–7.6)
 
 - **Journal (7.1b)**: canonical JSONL records (RUN-START/INTENT/RESULT/RUN-END
   forward; UNDO-START/INTENT/RESULT/END per attempt segment) with per-record
@@ -309,8 +329,6 @@ Safety invariants and their wording constraints: see
   unanchored) after §9.3 reconciliation; a live undo window refuses forward
   apply unless superseded via `--apply --acknowledge-undo-window` (§9.5/§8).
 
-marker_guard = True
-
 ## 11. Phase 5 implementation notes (IMPLEMENTED) and OS finding
 
 - **Executor flow**: plan validation -> fresh PathGuard bootstrap -> root
@@ -329,7 +347,12 @@ marker_guard = True
   name, buffer sized `sizeof(FILE_RENAME_INFORMATION) + name_bytes` (see
   the contract note below). No path-based rename exists anywhere; no
   fallback. Runtime-verified end-to-end (movement, Unicode, 255-unit
-  names, conflicts, fail-closed paths) in Phases 5.1.5/6.
+  names, conflicts, fail-closed paths) in Phases 5.1.5/6. Phase 8 extends
+  the primitive's ACCEPTED targets to multi-component root-relative paths
+  for undo restores: the intermediate walk verifies every component with
+  the traversal gates and the rename itself stays handle-anchored —
+  `RootDirectory` = the deepest verified directory handle, `FileName` =
+  the final single component (NT never resolves a path string).
 - **OS FINDING (build 26300, disclosed and RESOLVED)**: the Win32
   `SetFileInformationByHandle(FileRenameInfo)` (class 3) form fails with
   ERROR_INVALID_PARAMETER (87) for every handle/flag/size/null convention
@@ -348,6 +371,62 @@ marker_guard = True
   must be at least `sizeof(FILE_RENAME_INFO) + FileNameLength` bytes - a
   plain `offsetof(FileName) + bytes` buffer is rejected with 87 even for
   absolute-path renames. The rename buffer sizing was fixed accordingly.
-- **CLI**: `--apply` executes the plan; exit 0 all moved, exit 3 partial
-  failures, exit 2 safety abort (RootChanged/invalid plan). Dry-run remains
-  the default and remains mutation-free.
+- **CLI**: `--apply` executes the plan; exit 3 operational failure
+  (scan/planning, journal storage I/O) or execution completed with failures,
+  exit 2 safety abort (RootChanged/invalid plan), exit 0 all moved. Dry-run
+  remains the default and remains mutation-free.
+
+## 13. Phase 8 implementation notes (IMPLEMENTED)
+
+- **`--recursive` (forward organization)**: deterministic DFS from the
+  retained root handle. Category destination directories are excluded from
+  traversal (never sources); reparse-point, hidden, and system
+  subdirectories are skipped without being opened at any depth
+  (fail-closed containment — a junction can neither escape the root nor
+  duplicate traversal); an identity-visited set guards against
+  identity-duplicate directories; depth (64) and entry (50,000) caps fail
+  the whole scan; enumeration failure fails the whole scan (no incomplete
+  plans). Nested files carry root-relative paths through planning,
+  classification (by basename), whole-plan collision resolution, and
+  journaling.
+- **Journal relative paths (ratified extension, PHASE8-DESIGN §1.3)**:
+  forward and undo move records carry the file's root-relative path in
+  `source_name` — UTF-8, ≤ 765 bytes for the WHOLE path, separator-split
+  into components, each component a single safe name (no `.`/`..`, quotes,
+  slashes, colons, or control characters; no leading/trailing separator).
+  The canonical encoding of a backslash is the `\\` escape and it is the
+  only escape that survives the parser's post-decode validation. `dest_name`
+  remains a single component everywhere.
+- **Relative source opens (`open_source_at`)**: component-validated walk
+  through parent handles, each step gated against reparse/hidden/system
+  intermediates; the final component opens through the unchanged ratified
+  policy. Containment is structural (parent-handle anchoring), never
+  path-string based.
+- **Undo restore of nested locations**: the reverse rename accepts a
+  multi-component recorded path — the gated intermediate walk refuses
+  reparse/hidden/system intermediates and reports missing ones (undo never
+  creates directories); the rename lands relative to the deepest verified
+  handle with `ReplaceIfExists = FALSE`.
+- **`--retry`**: explicit user-invoked (`--retry` previews; `--retry
+  --apply` executes). Classification reads the NEWEST journal's RESULT
+  outcomes: Locked/AccessDenied are retryable only after a fresh preflight
+  re-opens the source and matches the recorded fingerprint (identity
+  digest AND creation time); Moved, permanent destination/source states,
+  identity failures, and the generic `Failed` outcome are never retried.
+  A blocked/corrupt newest chain refuses entirely (exit 2, flag-immune).
+  Every retry apply is a fresh fully-journaled run with a new sequence
+  identity; the original journal is never rewritten.
+- **CLI grammar**: `--recursive` is forward-only; `--retry` is
+  forward-only; both are mutually exclusive with each other and with
+  `--undo` (ratified Phase 8 grammar). `--acknowledge-undo-window` requires
+  an actual apply mode — `--apply` or `--retry --apply`; a read-only preview,
+  `--undo`, or `--retry` alone is a usage error (exit 1). Exit codes
+  unchanged (0/1/2/3).
+- **Tests**: 279 cases / 14,893 assertions per configuration (Debug and
+  Release, zero failed, zero skipped, zero warnings) — recursive nesting,
+  collisions across depths, dry-run mutation-freedom, journaled apply +
+  undo restore, category/reparse/hidden/system exclusion, reparse at
+  depth, junction cycles, containment under plan-then-apply mutation
+  (removal, reparse substitution), depth/entry limits, determinism, empty
+  trees; retry taxonomy, fresh-preflight gating, fingerprint mismatch,
+  vanished sources, blocked journals, and the fresh-journal invariant.

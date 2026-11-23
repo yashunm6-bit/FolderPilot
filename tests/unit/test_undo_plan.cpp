@@ -199,7 +199,7 @@ TEST_CASE("W4: a torn RUN-END terminal is disclosed and the run stays undoable")
     // candidates remain undoable.
     std::string result_integrity;
     {
-        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
         REQUIRE(opened.ok);
         auto storage = open_storage_root(f.base.u8(), f.root.root);
         REQUIRE(storage.ok);

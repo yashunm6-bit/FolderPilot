@@ -106,6 +106,14 @@ TEST_CASE("T-05: the acknowledgement option with --undo is a usage error (exit 1
     CHECK(run.exit_code == 1);
 }
 
+TEST_CASE("T-08: the acknowledgement option with a retry preview is a usage error (exit 1)") {
+    CliUndoFixture f{"ucli-ack-retry-preview"};
+    REQUIRE(f.root.ok);
+    const auto run = run_folderpilot_cli({wide_path(f.organized.path()),
+                                          L"--retry", L"--acknowledge-undo-window"});
+    CHECK(run.exit_code == 1);
+}
+
 TEST_CASE("T-06: a second forward apply without the acknowledgement is refused (exit 2)") {
     CliUndoFixture f{"ucli-window"};
     REQUIRE(f.root.ok);

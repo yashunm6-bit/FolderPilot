@@ -785,6 +785,204 @@ SourceOpen open_source(HANDLE root_handle, std::string_view utf8_name) {
     return out;
 }
 
+SourceOpen open_source_at(HANDLE root_handle, std::string_view utf8_relative_path) {
+    SourceOpen out;
+    if (root_handle == nullptr) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "root handle is not valid";
+        return out;
+    }
+    const auto wide = to_utf16(utf8_relative_path);
+    if (!wide.ok) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "relative path is not valid UTF-8: " + wide.error;
+        return out;
+    }
+    // Split into components; every component must be a single safe name
+    // (no separators inside, no "."/"..", no drive/ADS forms). Empty
+    // components (duplicate/backslash-run) are malformed.
+    std::vector<std::wstring> components;
+    std::wstring current;
+    for (const wchar_t c : wide.value) {
+        if (c == L'\\') {
+            components.push_back(current);
+            current.clear();
+            continue;
+        }
+        current.push_back(c);
+    }
+    components.push_back(current);
+    if (components.empty() || components[0].empty()) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "relative path is empty or not root-relative";
+        return out;
+    }
+    for (const std::wstring& comp : components) {
+        if (comp.empty() || comp == L"." || comp == L".." ||
+            comp.find_first_of(L"/\\:") != std::wstring::npos) {
+            out.failure = NativeFailure::InvalidPath;
+            out.error = "relative path component is not a single safe name";
+            return out;
+        }
+        if (comp.size() > 255) {
+            out.failure = NativeFailure::InvalidPath;
+            out.error = "relative path component exceeds 255 UTF-16 units";
+            return out;
+        }
+    }
+
+    // Walk the INTERMEDIATE components one step at a time through parent
+    // handles, gating each against reparse/hidden/system (containment is
+    // structural: every step opens through the previous handle, never by
+    // path). A single-component path skips the walk entirely.
+    std::vector<unique_handle> intermediates;
+    HANDLE walk_current = root_handle;
+    for (std::size_t i = 0; i + 1 < components.size(); ++i) {
+        const std::wstring& comp = components[i];
+        UNICODE_STRING nt_name{};
+        nt_name.Length = static_cast<USHORT>(comp.size() * sizeof(WCHAR));
+        nt_name.MaximumLength = nt_name.Length + sizeof(WCHAR);
+        nt_name.Buffer = const_cast<PWSTR>(comp.c_str());
+        OBJECT_ATTRIBUTES oa{};
+        oa.Length = sizeof(oa);
+        oa.RootDirectory = walk_current;
+        oa.Attributes = OBJ_CASE_INSENSITIVE;
+        oa.ObjectName = &nt_name;
+        IO_STATUS_BLOCK iosb{};
+        HANDLE raw_handle = nullptr;
+        const LONG status = native_apis().nt_create_file(
+            &raw_handle,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE |
+                SYNCHRONIZE,
+            &oa, &iosb, nullptr, 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT |
+                FILE_SYNCHRONOUS_IO_NONALERT,
+            nullptr, 0);
+        if (status < 0) {
+            out.failure = classify_ntstatus(status);
+            out.native_code = static_cast<unsigned long>(status);
+            out.error = "intermediate directory could not be opened safely";
+            return out;
+        }
+        unique_handle step{raw_handle};
+        FILE_ATTRIBUTE_TAG_INFO tag{};
+        if (!::GetFileInformationByHandleEx(step.get(), FileAttributeTagInfo, &tag,
+                                            sizeof(tag))) {
+            out.failure = NativeFailure::Other;
+            out.native_code = ::GetLastError();
+            out.error = win32_message("GetFileInformationByHandleEx(FileAttributeTagInfo)",
+                                      out.native_code);
+            return out;
+        }
+        if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            (tag.FileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0 ||
+            (tag.FileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0 ||
+            (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            out.failure = NativeFailure::InvalidPath;
+            out.error = "an intermediate directory is a reparse point, hidden "
+                        "or system, or is not a directory (fail closed)";
+            return out;
+        }
+        intermediates.push_back(std::move(step));
+        walk_current = intermediates.back().get();
+    }
+
+    // The final component through the ratified file-open policy, relative to
+    // the deepest directory handle.
+    const auto final_narrow = to_utf8(components.back());
+    if (!final_narrow.ok) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "relative path final component is not valid UTF-16: " +
+                    final_narrow.error;
+        return out;
+    }
+    return open_source(walk_current, final_narrow.value);
+}
+
+TraversalDirOpen open_traversal_directory(HANDLE parent_handle,
+                                          std::string_view utf8_name) {
+    TraversalDirOpen out;
+    if (parent_handle == nullptr) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "parent handle is not valid";
+        return out;
+    }
+    const auto wide = to_utf16(utf8_name);
+    if (!wide.ok) {
+        out.failure = NativeFailure::InvalidPath;
+        out.error = "directory name is not valid UTF-8: " + wide.error;
+        return out;
+    }
+    UNICODE_STRING nt_name{};
+    nt_name.Length = static_cast<USHORT>(wide.value.size() * sizeof(WCHAR));
+    nt_name.MaximumLength = nt_name.Length + sizeof(WCHAR);
+    nt_name.Buffer = const_cast<PWSTR>(wide.value.c_str());
+    OBJECT_ATTRIBUTES oa{};
+    oa.Length = sizeof(oa);
+    oa.RootDirectory = parent_handle;
+    oa.Attributes = OBJ_CASE_INSENSITIVE;
+    oa.ObjectName = &nt_name;
+    IO_STATUS_BLOCK iosb{};
+    HANDLE raw_handle = nullptr;
+    const LONG status = native_apis().nt_create_file(
+        &raw_handle,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE,
+        &oa, &iosb, nullptr, 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        nullptr, 0);
+    if (status < 0) {
+        out.failure = classify_ntstatus(status);
+        out.native_code = static_cast<unsigned long>(status);
+        out.error = "traversal directory could not be opened";
+        return out;
+    }
+    unique_handle handle{raw_handle};
+
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (!::GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo, &tag,
+                                        sizeof(tag))) {
+        out.failure = NativeFailure::Other;
+        out.native_code = ::GetLastError();
+        out.error = win32_message("GetFileInformationByHandleEx(FileAttributeTagInfo)",
+                                  out.native_code);
+        return out;
+    }
+    out.attributes = EntryAttributes{true, tag.FileAttributes, tag.ReparseTag};
+
+    FILE_ID_INFO id_info{};
+    if (::GetFileInformationByHandleEx(handle.get(), FileIdInfo, &id_info,
+                                       sizeof(id_info))) {
+        out.identity = SourceIdentityEx{id_info.VolumeSerialNumber, id_info.FileId};
+    } else {
+        const DWORD err = ::GetLastError();
+        if (err == ERROR_INVALID_PARAMETER || err == ERROR_NOT_SUPPORTED) {
+            BY_HANDLE_FILE_INFORMATION legacy{};
+            if (!::GetFileInformationByHandle(handle.get(), &legacy)) {
+                out.failure = NativeFailure::Other;
+                out.native_code = ::GetLastError();
+                out.error = win32_message("GetFileInformationByHandle", out.native_code);
+                return out;
+            }
+            out.identity = SourceIdentityLegacy{legacy.dwVolumeSerialNumber,
+                                                legacy.nFileIndexHigh,
+                                                legacy.nFileIndexLow};
+        } else {
+            out.failure = NativeFailure::Other;
+            out.native_code = err;
+            out.error = win32_message("GetFileInformationByHandleEx(FileIdInfo)", err);
+            return out;
+        }
+    }
+
+    out.ok = true;
+    out.handle = unique_handle{handle.release()};
+    return out;
+}
+
 SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name) {
     // Phase 3 compatibility: same pipeline, but the handle is closed before
     // returning (the scanner never keeps source handles).
@@ -969,40 +1167,134 @@ NativeResult native_rename_to_category(HANDLE source_handle, HANDLE destination_
     if (source_handle == nullptr || destination_dir == nullptr) {
         return {false, NativeFailure::Other, "source or destination handle is not valid", 0};
     }
-    if (destination_name.empty() || destination_name == "." || destination_name == ".." ||
-        destination_name.find_first_of("/\\:") != std::string_view::npos) {
-        return {false, NativeFailure::InvalidPath,
-                "destination name is not a single safe path component", 0};
-    }
+    // The target is a root-relative path: a single component (the Phase 7
+    // flat form) or a multi-component relative path (the Phase 8 recursive
+    // undo form, docs/PHASE8-DESIGN.md section 1.3). Component rules match
+    // open_source_at. Containment stays structural: the intermediate walk
+    // below refuses reparse/hidden/system intermediates and reports missing
+    // directories (undo never creates directories), and the rename lands
+    // relative to the deepest VERIFIED directory handle - NT never resolves
+    // the path itself.
     const auto wide = to_utf16(destination_name);
     if (!wide.ok) {
         return {false, NativeFailure::InvalidPath,
-                "destination name is not valid UTF-8: " + wide.error, 0};
+                "destination path is not valid UTF-8: " + wide.error, 0};
+    }
+    std::vector<std::wstring> components;
+    std::wstring current;
+    for (const wchar_t c : wide.value) {
+        if (c == L'\\') {
+            components.push_back(current);
+            current.clear();
+            continue;
+        }
+        current.push_back(c);
+    }
+    components.push_back(current);
+    if (components.empty() || components[0].empty()) {
+        return {false, NativeFailure::InvalidPath,
+                "destination path is empty or not root-relative", 0};
+    }
+    for (const std::wstring& comp : components) {
+        if (comp.empty() || comp == L"." || comp == L".." ||
+            comp.find_first_of(L"/\\:") != std::wstring::npos) {
+            return {false, NativeFailure::InvalidPath,
+                    "destination path component is not a single safe name", 0};
+        }
+        if (comp.size() > 255) {
+            return {false, NativeFailure::InvalidPath,
+                    "destination path component exceeds 255 UTF-16 units", 0};
+        }
     }
     if (!native_apis().ok()) {
         return {false, NativeFailure::Unsupported,
                 "required ntdll functions are unavailable", 0};
     }
 
+    // Walk the intermediate components (multi-component form only) through
+    // parent handles with the traversal gates.
+    std::vector<unique_handle> intermediates;
+    HANDLE target_dir = destination_dir;
+    for (std::size_t i = 0; i + 1 < components.size(); ++i) {
+        const std::wstring& comp = components[i];
+        UNICODE_STRING nt_name{};
+        nt_name.Length = static_cast<USHORT>(comp.size() * sizeof(WCHAR));
+        nt_name.MaximumLength = nt_name.Length + sizeof(WCHAR);
+        nt_name.Buffer = const_cast<PWSTR>(comp.c_str());
+        OBJECT_ATTRIBUTES oa{};
+        oa.Length = sizeof(oa);
+        oa.RootDirectory = target_dir;
+        oa.Attributes = OBJ_CASE_INSENSITIVE;
+        oa.ObjectName = &nt_name;
+        IO_STATUS_BLOCK iosb{};
+        HANDLE raw_handle = nullptr;
+        const LONG status = native_apis().nt_create_file(
+            &raw_handle,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_TRAVERSE |
+                SYNCHRONIZE,
+            &oa, &iosb, nullptr, 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT |
+                FILE_SYNCHRONOUS_IO_NONALERT,
+            nullptr, 0);
+        if (status < 0) {
+            const NativeFailure failure = classify_ntstatus(status);
+            if (failure == NativeFailure::ConfirmedNotFound) {
+                return {false, NativeFailure::ConfirmedNotFound,
+                        "an intermediate directory of the recorded location "
+                        "no longer exists (undo never creates directories)",
+                        static_cast<unsigned long>(status)};
+            }
+            return {false, failure,
+                    "an intermediate directory of the recorded location "
+                    "could not be opened safely",
+                    static_cast<unsigned long>(status)};
+        }
+        unique_handle step{raw_handle};
+        FILE_ATTRIBUTE_TAG_INFO tag{};
+        if (!::GetFileInformationByHandleEx(step.get(), FileAttributeTagInfo, &tag,
+                                            sizeof(tag))) {
+            const DWORD err = ::GetLastError();
+            return {false, NativeFailure::Other,
+                    win32_message("GetFileInformationByHandleEx(FileAttributeTagInfo)",
+                                  err),
+                    err};
+        }
+        if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            (tag.FileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0 ||
+            (tag.FileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0 ||
+            (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            return {false, NativeFailure::InvalidPath,
+                    "an intermediate directory is a reparse point, hidden or "
+                    "system, or is not a directory (fail closed)", 0};
+        }
+        intermediates.push_back(std::move(step));
+        target_dir = intermediates.back().get();
+    }
+
+    // The final component, renamed relative to the deepest verified handle.
+    const std::wstring final_component = components.back();
+
     // FILE_RENAME_INFORMATION (winternl.h) is layout-identical to
     // FILE_RENAME_INFO: union BOOLEAN/DWORD at 0, RootDirectory at 8,
     // FileNameLength (ULONG) at 16, FileName at offsetof = 20 (x64).
     constexpr std::size_t kHeader = offsetof(FILE_RENAME_INFORMATION, FileName);
-    if (wide.value.size() > (std::numeric_limits<ULONG>::max)() / sizeof(WCHAR) ||
+    if (final_component.size() > (std::numeric_limits<ULONG>::max)() / sizeof(WCHAR) ||
         sizeof(FILE_RENAME_INFORMATION) >
-            (std::numeric_limits<ULONG>::max)() - wide.value.size() * sizeof(WCHAR)) {
+            (std::numeric_limits<ULONG>::max)() - final_component.size() * sizeof(WCHAR)) {
         return {false, NativeFailure::InvalidPath,
                 "destination name exceeds the maximum representable length", 0};
     }
-    const ULONG name_bytes = static_cast<ULONG>(wide.value.size() * sizeof(WCHAR));
+    const ULONG name_bytes = static_cast<ULONG>(final_component.size() * sizeof(WCHAR));
     const ULONG total = static_cast<ULONG>(sizeof(FILE_RENAME_INFORMATION) + name_bytes);
 
     std::vector<std::byte> buffer(total);
     auto* info = reinterpret_cast<FILE_RENAME_INFORMATION*>(buffer.data());
     info->ReplaceIfExists = FALSE;                        // OS-enforced no-overwrite
-    info->RootDirectory = destination_dir;                // validated category handle
+    info->RootDirectory = target_dir;                     // deepest verified handle
     info->FileNameLength = name_bytes;                    // exact UTF-16 byte count
-    std::memcpy(buffer.data() + kHeader, wide.value.data(), name_bytes);
+    std::memcpy(buffer.data() + kHeader, final_component.data(), name_bytes);
     *reinterpret_cast<wchar_t*>(buffer.data() + kHeader + name_bytes) = L'\0'; // slack, uncounted
 
     IO_STATUS_BLOCK iosb{};

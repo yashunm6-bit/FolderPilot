@@ -1,6 +1,7 @@
 // FolderPilot - organization planner implementation.
 
 #include "folderpilot/planner.hpp"
+#include "folderpilot/journal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -124,10 +125,18 @@ OrganizationPlan build_plan(const platform::RootDirectory& root,
         plan.categories_.push_back(std::move(status));
     }
 
-    // ---- 3. Classify and group candidates, preserving scan order.
+    // ---- 3. Classify and group candidates, preserving scan order. For
+    // recursive scans the source name is a RELATIVE PATH: classification and
+    // destination naming use the BASENAME, while source_name keeps the
+    // relative path (the journal's 765-byte source_name cap refuses longer
+    // paths - fail closed).
+    auto base_name = [](const std::string& rel) -> std::string {
+        const auto pos = rel.find_last_of("/\\");
+        return pos == std::string::npos ? rel : rel.substr(pos + 1);
+    };
     std::array<std::vector<const ScannedFile*>, 7> grouped{};
     for (const ScannedFile& file : scan.files) {
-        const Category category = classify_filename(file.name_utf8);
+        const Category category = classify_filename(base_name(file.name_utf8));
         grouped[static_cast<std::size_t>(category)].push_back(&file);
     }
 
@@ -167,10 +176,10 @@ OrganizationPlan build_plan(const platform::RootDirectory& root,
             }
         }
         for (const ScannedFile* file : candidates) {
-            resolver.reserve_natural(file->name_utf8);
+            resolver.reserve_natural(base_name(file->name_utf8));
         }
         for (const ScannedFile* file : candidates) {
-            const auto destination = resolver.allocate(file->name_utf8);
+            const auto destination = resolver.allocate(base_name(file->name_utf8));
             if (!destination.has_value()) {
                 plan.skipped_.push_back(SkippedEntry{
                     file->name_utf8, SkipReason::CollisionExhausted,
@@ -178,6 +187,18 @@ OrganizationPlan build_plan(const platform::RootDirectory& root,
                         std::to_string(options.max_collision_suffixes) + " suffix attempts",
                     0});
                 continue;
+            }
+            // §20.7/PHASE8-DESIGN §1.3/§2: the journal source_name rules
+            // (765-byte CANONICAL cap plus component safety) apply to the
+            // relative path. An unjournalable source is a WHOLE-PLAN refusal:
+            // never publish a partial plan whose move would stop the journal
+            // (R1) after earlier files have already been moved.
+            std::string name_error;
+            if (!validate_journal_source_name(name_error, file->name_utf8)) {
+                plan.moves_.clear();
+                plan.skipped_.clear();
+                plan.error_ = "planned source name is not journalable: " + name_error;
+                return plan;
             }
             PlannedMove move;
             move.source_name = file->name_utf8;

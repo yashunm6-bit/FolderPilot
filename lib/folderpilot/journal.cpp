@@ -200,6 +200,69 @@ bool check_name(std::string& error, std::string_view v, std::string_view what) {
     return true;
 }
 
+// A relative source path (Phase 8 recursive journals carry the file's
+// relative path in source_name, docs/PHASE8-DESIGN.md section 1.3): UTF-8,
+// within the name cap, split on separators into components; every component
+// is a single safe name (non-empty, not "."/"..", no quotes, slashes,
+// colons or control characters). dest_name stays a single component.
+// The ratified §5 cap basis is the CANONICAL SERIALIZED form: every
+// backslash canonically doubles to the '\\' escape, so the cap measures the
+// escaped length of the whole path - a separator-heavy path never smuggles
+// a larger-than-cap canonical member past admission (the reserve arithmetic
+// stays exact).
+bool check_relative_path(std::string& error, std::string_view v,
+                         std::string_view what) {
+    if (v.empty()) {
+        error = std::string(what) + " must not be empty";
+        return false;
+    }
+    if (!valid_utf8(v)) {
+        error = std::string(what) + " is not valid UTF-8";
+        return false;
+    }
+    std::size_t canonical_size = v.size();
+    for (const char ch : v) {
+        if (ch == '\\') {
+            ++canonical_size;
+        }
+    }
+    if (canonical_size > journal_name_max_bytes) {
+        error = std::string(what) + " exceeds its " +
+                std::to_string(journal_name_max_bytes) + "-byte canonical cap";
+        return false;
+    }
+    if (v.front() == '\\' || v.back() == '\\') {
+        error = std::string(what) + " must not begin or end with a separator";
+        return false;
+    }
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t sep = v.find('\\', start);
+        const std::size_t end =
+            sep == std::string_view::npos ? v.size() : sep;
+        const std::string_view comp = v.substr(start, end - start);
+        if (comp.empty() || comp == "." || comp == "..") {
+            error = std::string(what) +
+                    " contains an empty, \".\" or \"..\" component";
+            return false;
+        }
+        for (const char ch : comp) {
+            const unsigned char c = static_cast<unsigned char>(ch);
+            if (c < 0x20 || c == '"' || c == '/' || c == ':') {
+                error = std::string(what) +
+                        " contains a component with quotes, slashes, colons "
+                        "or control characters";
+                return false;
+            }
+        }
+        if (sep == std::string_view::npos) {
+            break;
+        }
+        start = sep + 1;
+    }
+    return true;
+}
+
 bool valid_category(Category c) {
     for (const Category known : all_categories) {
         if (known == c) {
@@ -275,7 +338,7 @@ bool append_move_evidence(std::string& out, std::string& error, bool with_move_i
     if (!check_identity(error, file_id, "file_id")) {
         return false;
     }
-    if (!check_name(error, source_name, "source_name")) {
+    if (!check_relative_path(error, source_name, "source_name")) {
         return false;
     }
     if (!check_name(error, dest_name, "dest_name")) {
@@ -621,6 +684,7 @@ struct StringRules {
     bool allow_empty = false;
     bool forbid_escapes = false;   // names/type/dir: canonical form never escapes them
     bool forbid_controls = false;  // names/type/dir: raw control bytes rejected
+    bool path_components = false;  // relative source paths: component rules
 };
 
 StringRules identity_rules() {
@@ -634,6 +698,17 @@ StringRules name_rules() {
     r.max_bytes = journal_name_max_bytes;
     r.forbid_escapes = true;
     r.forbid_controls = true;
+    return r;
+}
+
+StringRules path_rules() {
+    StringRules r;
+    r.max_bytes = journal_name_max_bytes;
+    // The canonical encoding of a backslash inside a relative path is the
+    // '\\' escape; every other escape decodes to a value the component
+    // rules reject, so canonical strictness is preserved by validation.
+    r.forbid_controls = true;
+    r.path_components = true;
     return r;
 }
 
@@ -852,6 +927,16 @@ struct LineParser {
                     std::string msg = what;
                     msg += " is not valid UTF-8";
                     return fail(ParseFailureKind::InvalidUtf8, std::move(msg), start);
+                }
+                if (rules.path_components) {
+                    std::string path_error;
+                    if (!check_relative_path(path_error, value, what)) {
+                        return fail(ParseFailureKind::NonCanonicalEncoding,
+                                    std::string(what) +
+                                        " is not a canonical relative source "
+                                        "path: " + path_error,
+                                    start);
+                    }
                 }
                 out = std::move(value);
                 return true;
@@ -1177,7 +1262,7 @@ bool parse_record_schema(LineParser& p, ParsedLine& out) {
                 return false;
             }
             if (!p.expect_key("source_name") ||
-                !p.read_string_value(r.source_name, name_rules(), "source_name")) {
+                !p.read_string_value(r.source_name, path_rules(), "source_name")) {
                 return false;
             }
             if (!p.expect_key("dest_name") ||
@@ -1227,7 +1312,7 @@ bool parse_record_schema(LineParser& p, ParsedLine& out) {
                 return false;
             }
             if (!p.expect_key("source_name") ||
-                !p.read_string_value(r.source_name, name_rules(), "source_name")) {
+                !p.read_string_value(r.source_name, path_rules(), "source_name")) {
                 return false;
             }
             if (!p.expect_key("dest_name") ||
@@ -1359,7 +1444,7 @@ bool parse_record_schema(LineParser& p, ParsedLine& out) {
                 return false;
             }
             if (!p.expect_key("source_name") ||
-                !p.read_string_value(r.source_name, name_rules(), "source_name")) {
+                !p.read_string_value(r.source_name, path_rules(), "source_name")) {
                 return false;
             }
             if (!p.expect_key("dest_name") ||
@@ -1416,7 +1501,7 @@ bool parse_record_schema(LineParser& p, ParsedLine& out) {
                 return false;
             }
             if (!p.expect_key("source_name") ||
-                !p.read_string_value(r.source_name, name_rules(), "source_name")) {
+                !p.read_string_value(r.source_name, path_rules(), "source_name")) {
                 return false;
             }
             if (!p.expect_key("dest_name") ||
@@ -1863,6 +1948,10 @@ std::optional<JournalRecordType> scan_tail_type_hint(std::string_view tail) {
 }
 
 } // namespace
+
+bool validate_journal_source_name(std::string& error, std::string_view name) {
+    return check_relative_path(error, name, "source_name");
+}
 
 // ---------------------------------------------------------------------------
 // Public name tables.

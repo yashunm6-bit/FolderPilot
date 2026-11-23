@@ -297,7 +297,11 @@ struct SourceInspection {
     unsigned long long creation_time_filetime = 0;  // FILE_BASIC_INFO.CreationTime (CreationTime, not ChangeTime)
 };
 
+
+
 SourceInspection inspect_source(HANDLE root_handle, std::string_view utf8_name);
+
+
 
 // ---------------------------------------------------------------------------
 // Phase 5 executor primitives.
@@ -322,6 +326,34 @@ struct SourceOpen {
     long long last_write_time = 0;
     unsigned long long creation_time_filetime = 0;  // FILE_BASIC_INFO.CreationTime (CreationTime, not ChangeTime)
 };
+
+// Phase 8: opens a source file at a RELATIVE PATH under the retained root
+// handle (multi-component; walked component-by-component through parent
+// handles, each step gated against reparse/hidden/system intermediates -
+// containment is structural, never path-string based). The component rules
+// match open_source per component (no empty/./.. /separators inside
+// components; no drive/UNC/ADS forms); a single-component path behaves
+// identically to inspect_source's open. The handle is closed before
+// returning (scanner compatibility).
+SourceOpen open_source_at(HANDLE root_handle, std::string_view utf8_relative_path);
+
+// Phase 8: opens a SUBDIRECTORY for recursive traversal through the parent
+// handle. Read-only traversal policy: FILE_LIST_DIRECTORY |
+// FILE_READ_ATTRIBUTES | FILE_TRAVERSE | SYNCHRONIZE, share R|W, opened with
+// FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT (a reparse point is opened
+// itself and reported through the attributes - the caller skips it). The
+// child's identity is captured for the caller's visited-set.
+struct TraversalDirOpen {
+    bool ok = false;
+    NativeFailure failure = NativeFailure::Other;
+    std::string error;
+    unsigned long native_code = 0;
+    unique_handle handle;              // valid when ok
+    EntryAttributes attributes{};      // FileAttributeTagInfo payload
+    SourceIdentity identity{};         // captured through the handle
+};
+TraversalDirOpen open_traversal_directory(HANDLE parent_handle,
+                                          std::string_view utf8_name);
 SourceOpen open_source(HANDLE root_handle, std::string_view utf8_name);
 
 // Opens (or, when `create_if_missing`, creates) a destination category

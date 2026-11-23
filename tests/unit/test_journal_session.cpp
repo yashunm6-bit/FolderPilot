@@ -89,7 +89,7 @@ TEST_CASE("T-84: sequence allocation starts at 1 and advances by name") {
         // the only legal shape for such a journal - the session's end_run
         // invariant rejects a planned count that exceeds the journaled
         // intents).
-        auto first = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+        auto first = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false);
         REQUIRE(first.ok);
         CHECK(first.session.root_run_seq() == 1);
         CHECK(first.session.journal_name() == "journal-00000000000000000001.jsonl");
@@ -106,7 +106,7 @@ TEST_CASE("T-84: sequence allocation starts at 1 and advances by name") {
 
     // The second run allocates the next sequence (the first run's files are
     // recognized storage entries).
-    auto second = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+    auto second = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false);
     INFO("second open: ok=" << second.ok << " failure="
          << static_cast<int>(second.failure) << " error=" << second.error);
     REQUIRE(second.ok);
@@ -120,7 +120,7 @@ TEST_CASE("T-85/M1: a journal without its anchor is legal classification and the
     REQUIRE(f.root.ok);
     plant_entry(f, "journal-00000000000000000001.jsonl");
 
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
     REQUIRE(opened.ok);
     CHECK(opened.session.root_run_seq() == 2);
 }
@@ -131,25 +131,25 @@ TEST_CASE("T-86: storage classification refuses malformed and unrecognized entri
 
     SUBCASE("malformed recognized-looking names") {
         plant_entry(f, "journal-12a3.jsonl");
-        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
         CHECK_FALSE(opened.ok);
         CHECK(opened.failure == JournalSessionFailure::StorageClassification);
     }
     SUBCASE("unrecognized entries") {
         plant_entry(f, "stuff.txt");
-        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
         CHECK_FALSE(opened.ok);
         CHECK(opened.failure == JournalSessionFailure::StorageClassification);
     }
     SUBCASE("case-variant recognized-looking names") {
         plant_entry(f, "JOURNAL-00000000000000000009.jsonl");
-        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
         CHECK_FALSE(opened.ok);
         CHECK(opened.failure == JournalSessionFailure::StorageClassification);
     }
     SUBCASE("orphan anchor without its journal") {
         plant_entry(f, "anchor-00000000000000000001.jsonl");
-        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+        auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
         CHECK_FALSE(opened.ok);
         CHECK(opened.failure == JournalSessionFailure::StorageClassification);
     }
@@ -165,12 +165,12 @@ TEST_CASE("T-94: capacity exhaustion refuses before any file creation") {
     // newest-chain gate does not parse it (only the newest run's chain is
     // gated).
     {
-        auto first = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+        auto first = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false);
         REQUIRE(first.ok);
         REQUIRE(first.session.end_run(JournalRunEnd{}).ok);
     }
     {
-        auto second = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+        auto second = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false);
         REQUIRE(second.ok);
         REQUIRE(second.session.end_run(JournalRunEnd{}).ok);
     }
@@ -180,7 +180,7 @@ TEST_CASE("T-94: capacity exhaustion refuses before any file creation") {
     REQUIRE_FALSE(ec);
 
     // Refusal BEFORE any file creation: no journal-...0003 exists.
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false);
     CHECK_FALSE(opened.ok);
     CHECK(opened.failure == JournalSessionFailure::CapacityExhausted);
     CHECK_FALSE(std::filesystem::exists(
@@ -193,7 +193,7 @@ TEST_CASE("T-87: RUN-START and the genesis anchor record are written and flushed
     SessionFixture f("js-runstart");
     REQUIRE(f.root.ok);
 
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 3, false, 0);
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 3, false);
     REQUIRE(opened.ok);
     auto storage = open_storage_root(f.base.u8(), f.root.root);
     REQUIRE(storage.ok);
@@ -231,7 +231,7 @@ TEST_CASE("T-87/T-91: intent, result and run-end records chain with anchor cover
     SessionFixture f("js-chain");
     REQUIRE(f.root.ok);
 
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
     REQUIRE(opened.ok);
     auto storage = open_storage_root(f.base.u8(), f.root.root);
     REQUIRE(storage.ok);
@@ -299,7 +299,7 @@ TEST_CASE("T-87/T-91: intent, result and run-end records chain with anchor cover
 TEST_CASE("T-88: the session refuses records after the run has ended") {
     SessionFixture f("js-ended");
     REQUIRE(f.root.ok);
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false, 0);
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 0, false);
     REQUIRE(opened.ok);
     REQUIRE(opened.session.end_run(JournalRunEnd{}).ok);
     auto again = opened.session.end_run(JournalRunEnd{});
@@ -315,7 +315,7 @@ TEST_CASE("lock contention refuses the journal session") {
     auto lock = acquire_mutation_lock(storage);
     REQUIRE(lock.ok);
 
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
     CHECK_FALSE(opened.ok);
     CHECK(opened.failure == JournalSessionFailure::LockHeld);
 }
@@ -325,7 +325,7 @@ TEST_CASE("sequence overflow refuses new runs (T-94 analogue)") {
     REQUIRE(f.root.ok);
     plant_entry(f, "journal-18446744073709551615.jsonl");
 
-    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false, 0);
+    auto opened = JournalSession::open_for_run(f.base.u8(), f.root.root, 1, false);
     CHECK_FALSE(opened.ok);
     CHECK(opened.failure == JournalSessionFailure::SequenceOverflow);
 }

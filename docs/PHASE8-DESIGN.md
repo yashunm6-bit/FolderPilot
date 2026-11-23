@@ -12,9 +12,9 @@ every mutation remains journaled through the Phase 7 mechanism).
 
 `folderpilot <root> --recursive [--apply]` — the dry-run default applies
 (preview shows the full recursive plan; `--apply` executes it journaled).
-`--recursive` may combine with `--undo`/`--retry`? No: recursive applies to
-forward organization only in this phase (undo and retry operate on journals
-regardless of how the forward run was produced).
+`--recursive` is forward-only and is mutually exclusive with `--undo` and
+`--retry`; undo and retry operate on journals regardless of how the forward
+run was produced.
 
 - Deterministic depth-first traversal from the retained root handle.
 - Files from ALL depths are planned into the ROOT's category destinations
@@ -62,8 +62,12 @@ regardless of how the forward run was produced).
   (vanishing is an enumerated-entry-level race, not an enumeration failure).
 - **Depth limit**: 64 levels; exceeding refuses the whole scan (structured
   reason).
-- **Entry limit**: 50,000 planned files + skipped entries in total;
-  exceeding refuses the whole scan (memory bound).
+- **Entry limit**: 50,000 planned files + skipped entries in total
+  (traversed directories are not terminal entries); exceeding refuses the
+  whole scan (memory bound).
+- **Directory limit**: 50,000 traversed directories; exceeding refuses the
+  whole scan (a separate memory bound — a broad tree of empty directories
+  cannot grow the visited set without limit).
 - **Long paths**: relative traversal through handles is not subject to the
   MAX_PATH path-length limit; the existing per-name (765-byte journal cap)
   and 255-UTF-16-unit component limits apply and refuse over-long names.
@@ -74,9 +78,11 @@ regardless of how the forward run was produced).
 
 - Every recursive move is journaled through the unchanged Phase 7.2 session
   (INTENT/RESULT with the file's RELATIVE source path in `source_name`).
-- `source_name` cap: the ratified 765-byte limit applies to the relative
-  path; the planner refuses files whose relative path exceeds it (fail
-  closed, structured reason) — documented, never truncated.
+- `source_name` validation: the planner applies the journal's
+  `validate_journal_source_name` rules to the relative path (the ratified
+  765-byte canonical cap PLUS per-component safety). A non-journalable
+  relative path refuses the WHOLE plan before any mutation (fail closed,
+  structured reason) — documented, never truncated.
 - Undo: reverse renames target `root\<relative source path>` — the recorded
   intermediate directories must still exist at undo time; if a directory was
   removed after organizing, the reverse rename fails and is reported (undo
@@ -99,6 +105,14 @@ RESULT outcomes, refined per the authorization:
 | `SourceMissing`, `SourceInvalid` | identity/state failures | never retried |
 | `Failed` | generic catch-all | NEVER retried without a ratified per-cause mapping (none exists yet) |
 
+`--retry --apply` builds its filtered candidate set from a full recursive
+scan of the root (so candidates recorded by a `--recursive` run can be
+matched by relative path), and that scan is fail-closed per §1.2: an
+unrelated inaccessible subdirectory anywhere in the tree aborts the whole
+retry with exit 3 even if no candidate lives there. This is deliberately
+broader than the per-candidate `open_source_at` preflight used by the
+read-only preview; it is a fail-safe refusal, never a partial retry.
+
 Whole-root lock contention is not a move outcome (the lock is acquired
 before any move) — a `--retry --apply` invocation that cannot acquire the
 lock refuses entirely (exit 2). Ambiguous/blocked/corrupt journal states
@@ -107,8 +121,11 @@ fully-journaled run with a NEW sequence identity; the original journal is
 never rewritten. Retry limits: one retry pass per invocation (no internal
 loops); repeated invocations are the user's control. Preview: `--retry`
 without `--apply` lists the retryable candidates and their fresh-preflight
-results (read-only). Exit codes per §2 (blocked → 2; nothing retryable → 0
-with a disclosure; partial → 3).
+results (read-only). Exit codes per PHASE7-DESIGN §2 / §20.8 (blocked → 2;
+nothing retryable → 0 with a disclosure; partial → 3). One documented
+exception to a purely read-only preview: `--retry` preview acquires the
+mutation lock for a consistent classification read (no lock file is created
+when a newest journal exists).
 
 ## 2. Implementation map
 
@@ -120,8 +137,9 @@ with a disclosure; partial → 3).
   closed enumeration); `SkipReason` gains `DepthLimitExceeded`,
   `EntryLimitExceeded`, `DirectoryIdentityDuplicate`.
 - `planner.cpp`: recursive entries carry the relative path in `source_name`
-  and the basename for classification/destination; relative paths exceeding
-  the 765-byte journal cap refuse the plan.
+  and the basename for classification/destination; a non-journalable relative
+  path (per `validate_journal_source_name`: 765-byte canonical cap plus
+  per-component safety) refuses the plan.
 - `executor.cpp`: journaled recursive execution — sources opened via
   `open_source_at`; the INTENT `source_name` is the relative path.
 - `undo reverse renames`: destination = root + relative source path (the
@@ -145,3 +163,57 @@ identity revalidation + the identity-visited set (tested against concurrent
 mutation). Enumeration failures fail closed (no incomplete plans). The retry
 path never moves a file whose current fingerprint does not match the journal
 record.
+
+## 4. Implementation record (IMPLEMENTED)
+
+- **Journal format extension (§1.3)**: `source_name` carries the
+  root-relative path on the serialize and parse sides — `check_relative_path`
+  (component-split rules, whole-path 765-byte cap) and `path_rules()` (the
+  canonical `\\` backslash escape is the only escape that survives
+  post-decode validation). `dest_name` remains a single component. The
+  undo-attempt records reuse the same rule (the recorded original location
+  round-trips through undo).
+- **`open_source_at`**: component-validated parent-handle walk with
+  per-step reparse/hidden/system gates; the final component opens through
+  the unchanged ratified policy. A defect found during verification — the
+  final component was narrowed wchar-to-char instead of converted to
+  UTF-8, breaking non-ASCII nested names — was fixed with `to_utf8`.
+- **Reverse rename**: `native_rename_to_category` accepts multi-component
+  root-relative targets for undo restores; the gated intermediate walk
+  refuses reparse/hidden/system intermediates and reports missing ones
+  (never creates directories); the rename stays handle-anchored
+  (`RootDirectory` = deepest verified handle, `FileName` = the final
+  component, `ReplaceIfExists = FALSE`). Single-component behavior is
+  byte-identical to Phase 7.
+- **Undo reconciliation** reads the recorded original location through
+  `open_source_at` (multi-component §9.3 presence/identity checks).
+- **Retry** (`retry_plan.{hpp,cpp}`): newest-journal RESULT classification
+  per §1.4; fresh preflight = `open_source_at` + fingerprint compare
+  (identity digest AND creation time). A latent CLI defect — the filtered
+  retry scan defaulted to `EnumerationStatus::Failed`, which would have
+  failed planning on every `--retry --apply` — was found by the
+  fresh-journal test and fixed.
+- **Independent-review amendments**: traversed directories no longer consume
+  the terminal-entry budget (only planned files and skipped entries do);
+  `JournalSessionFailure::StorageRead` maps to exit 3 in the forward-apply
+  path as it already did in preview/retry; an unjournalable source name
+  refuses the WHOLE plan before any mutation (the journal's own
+  `validate_journal_source_name` rules, not just a length check);
+  `--acknowledge-undo-window` requires an actual apply mode (a retry preview
+  is read-only); retry's full-scan fail-closed behavior is recorded in §1.4.
+  A separate fail-closed cap (50,000) bounds the number of traversed
+  directories, and the visited set is now O(1) hash-based, so a broad tree of
+  empty directories cannot exhaust memory. Test seams on the depth/entry/
+  directory limits let those whole-scan refusals be verified without 50,000
+  fixtures, and a `before_open` test verifies a directory replaced mid-walk
+  fails the scan closed.
+- **Verification**: Debug and Release, 279 cases / 14,893 assertions each,
+  zero failed, zero skipped, zero warnings. The recursive suites cover
+  nesting, whole-plan collisions across depths, dry-run
+  mutation-freedom, journaled apply + undo restore of nested locations,
+  category/reparse/hidden/system exclusion, reparse at depth, junction
+  cycles, plan-then-apply mutation (removal, reparse substitution),
+  depth/entry limits, determinism, and empty trees; the retry suites
+  cover the full §1.4 taxonomy, fresh-preflight gating, fingerprint
+  mismatch, vanished sources, blocked journals, and the fresh-journal
+  invariant (original journal byte-identical after a retry apply).

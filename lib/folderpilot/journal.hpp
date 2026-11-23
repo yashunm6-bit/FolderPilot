@@ -100,6 +100,11 @@ inline constexpr std::size_t journal_name_max_bytes = 765;
 inline constexpr std::size_t journal_detail_max_bytes = 512;
 inline constexpr std::size_t journal_hex_chars = 64;
 
+// The exact source_name rules enforced by append_move_evidence (both a single
+// component and a root-relative recursive path). Exposed so the planner can
+// refuse an unjournalable source BEFORE the first mutation of a run.
+bool validate_journal_source_name(std::string& error, std::string_view name);
+
 // 8-digit fields: seq, move_id, attempt_move_seq, undo_of_move, the
 // planned/candidate counts and the summary counts.
 inline constexpr unsigned long long journal_seq_max = 99999999ULL;

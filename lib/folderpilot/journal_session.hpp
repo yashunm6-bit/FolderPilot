@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "folderpilot/journal.hpp"
 #include "folderpilot/storage_adapter.hpp"
@@ -45,7 +47,36 @@ enum class JournalSessionFailure {
     AnchorWrite,           // the anchor append failed (W4; exit 3 stop)
     AnchorFlush,           // the anchor flush failed (W5; exit 3 stop)
     InvalidState,          // session-level invariant violation (never expected; fail closed)
+    StorageRead,           // a storage leaf read failed for classification (exit 3; not a chain refusal)
 };
+
+// Read-only classification of the storage directory and the newest forward
+// chain (the §20.1/§20.2 entry conventions, §4.1 chain classification and
+// the §8/§9.1 live-window fold), shared by the apply session and the Phase 8
+// retry preview so both enforce IDENTICAL rules. Takes NO lock: callers that
+// must never race a live writer hold the mutation lock around it (the apply
+// session already holds it; the retry preview acquires it for the read).
+struct StorageChainView {
+    bool ok = false;                    // classification completed cleanly
+    JournalSessionFailure failure = JournalSessionFailure::StorageInvalid;
+    std::string error;                  // classification refusal or read failure detail
+    unsigned long native_code = 0;
+    bool saw_any = false;
+    unsigned long long newest_seq = 0;  // max recognized sequence (0 when empty)
+    std::vector<unsigned long long> journal_seqs;
+    std::vector<unsigned long long> anchor_seqs;
+    std::vector<unsigned long long> undo_seqs;
+    std::optional<ParsedJournalFile> newest_journal;   // valid when ok
+    std::optional<ParsedAnchorFile> newest_anchor;     // nullopt when absent
+    bool live_undo_window = false;      // §8/§9.1 fold over the newest chain
+    unsigned long long window_root_run_seq = 0;  // the live window's forward run (§8 supersedes value)
+};
+
+// Enforces the full storage classification + newest-chain gate WITHOUT
+// mutating anything. Any refusal (unrecognized entries, orphan anchor or
+// segment, sequence overflow, unreadable leaves, parse failures, blocked
+// chains) returns !ok with the failure classified.
+StorageChainView classify_storage_and_newest_chain(const StorageRoot& root);
 
 struct JournalSessionResult {
     bool ok = false;
@@ -86,7 +117,6 @@ public:
         const platform::RootDirectory& organized_root,
         unsigned long long planned_move_count,
         bool undo_window_acknowledged,
-        unsigned long long supersedes_root_run_seq,
         const JournalSessionFaults& faults = {});
 
     // Writes INTENT (serialized with the running prev chain), flushes the

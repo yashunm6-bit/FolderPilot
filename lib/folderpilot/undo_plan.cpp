@@ -331,8 +331,10 @@ UndoPlanResult load_undo_plan(std::string_view storage_base_path,
         }
         const bool dest_present = dest.has_value();
 
-        // Source slot inspection (root-relative single component).
-        const auto src = platform::inspect_source(organized_root.get(), c.source_name);
+        // Source slot inspection: the recorded location may be a
+        // multi-component relative path (Phase 8 recursive journals); the
+        // open walks intermediates with the ratified containment gates.
+        const auto src = platform::open_source_at(organized_root.get(), c.source_name);
         const bool src_present = src.ok;
         const bool src_indeterminate =
             !src.ok && src.failure != platform::NativeFailure::ConfirmedNotFound;

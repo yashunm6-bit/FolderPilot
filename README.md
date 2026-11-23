@@ -6,7 +6,7 @@ FolderPilot will sort the files of a user-selected directory into category
 folders (Documents, Images, Videos, Audio, Archives, Code, Other) — showing a
 dry-run plan by default and moving files only on an explicit `--apply`.
 
-## Status: Phase 7 — Move Journal & Undo (7.1c storage adapter complete, hosted-verified; Phases 1–6 complete and accepted)
+## Status: Phase 8 — Recursive Organization & Retry (locally verified; Phases 1–7 complete and accepted)
 
 Phases 1–3 delivered the build/test foundation, the classification core,
 PathGuard and the handle-anchored scanner; Phase 4 added planning and
@@ -17,7 +17,7 @@ no-overwrite movement. The anchored rename is performed with the native
 fails with ERROR_INVALID_PARAMETER on build 26300 — a build-specific
 observation, not a universal Windows contract; no path-based fallback
 exists by design — see `docs/ARCHITECTURE.md` §11).
-Runtime verification of the current Phase 6 state:
+Runtime verification of the Phase 6 state (superseded):
 **Local (this machine, authorized Smart App Control–off window): Debug
 144/144 test cases, 1,762/1,762 assertions; Release 144/144 test cases,
 1,762/1,762 assertions — 0 failed and 0 skipped in both.**
@@ -33,8 +33,8 @@ anonymously (HTTP 401), so exact hosted doctest counts are not claimed.
 (Earlier run `43052752854`, commit `7f4a9db`, also succeeded but uploaded
 no artifact — wrong CTest log path, since fixed. History:
 `docs/PHASE6-CLOSEOUT.md` §3–§4.)
-Runtime verification of the current Phase 7.1c state (commit `e98089f`, storage
-adapter + ratified Decision A, 2026-11-18): **Local (this machine; Smart App
+Runtime verification of the Phase 7.1c state (superseded; commit `e98089f`,
+storage adapter + ratified Decision A, 2026-11-18): **Local (this machine; Smart App
 Control off by owner decision): Debug and Release each 225/225 test cases,
 14,112/14,112 assertions — 0 failed, 0 skipped — including genuine
 cross-process mutation-lock contention and crash-release child-process tests.**
@@ -45,6 +45,12 @@ artifact's SHA-256 was verified against the downloaded bytes, and its two
 ratified decisions A–E (NULL/absent-DACL refusal, root-key formula, hidden/
 system rule, operability ACL scope, lock_id derivation convention) are
 recorded in `docs/PHASE7-DESIGN.md` §16.
+Runtime verification of the current Phase 8 state (recursive organization +
+retry): **Local (this machine; Smart App Control off by owner decision):
+Debug and Release each 279/279 test cases, 14,893/14,893 assertions — 0
+failed, 0 skipped, 0 compiler warnings.** Hosted CI verification follows the
+push of this tree; the exact run ID and head SHA are recorded in the
+completion manifest.
 Historical, superseded by the figures above — Phase 5 state (commits
 `3940886`, `d024112`): 142/142 test cases, 1,748/1,748 assertions.
 Phase 6 adds Unicode CLI argument handling, Windows hardening, packaging
@@ -58,10 +64,20 @@ documentation, and CI-based regression testing (complete).
 ## Usage
 
 ```
-folderpilot <directory>            preview the organization plan (dry run, default)
-folderpilot <directory> --apply    execute the planned movements
+folderpilot <directory>                       preview the organization plan (dry run, default)
+folderpilot <directory> --apply               execute the planned movements (journaled)
+folderpilot <directory> --undo                preview the undo plan (dry run)
+folderpilot <directory> --undo --apply        restore journaled files
+folderpilot <directory> --recursive [--apply] include subdirectories (forward only)
+folderpilot <directory> --retry [--apply]     re-attempt locked/denied moves
+folderpilot <directory> --apply --acknowledge-undo-window
+folderpilot <directory> --retry --apply --acknowledge-undo-window
 folderpilot --help | --version
 ```
+
+`--recursive` is forward-only and cannot be combined with `--undo` or `--retry`;
+`--retry` is likewise mutually exclusive with both. The acknowledgement is
+valid only with an actual forward execution (`--apply` or `--retry --apply`).
 
 - **Dry run is the default and never modifies anything.** Movement happens
   only with the explicit `--apply` flag. There is no `--force` and no
@@ -71,10 +87,30 @@ folderpilot --help | --version
   journaled files back to their original locations (never overwriting — a
   refilled slot is a reported Conflict). A live undo window refuses further
   forward applies until superseded via `--apply --acknowledge-undo-window`
-  (durably recorded). Undo restores locations, never file contents.
+  (durably recorded). The acknowledgement is also valid with `--retry
+  --apply`; it is a usage error (exit 1) with a dry run, `--undo` or
+  `--retry` alone. Undo restores locations, never file contents.
+- **Recursive organization (Phase 8)**: `--recursive` also organizes files
+  in subdirectories (deterministic order; whole-plan collision suffixes
+  across depths). Reparse points (junctions/symlinks), hidden, and system
+  directories are never traversed, and the created category directories
+  are never scanned as sources — the traversal cannot escape the target
+  directory. Journaled and undoable like every other run; `--undo --apply`
+  restores nested files to their original nested locations (directories
+  are never created — a removed intermediate is a reported failure).
+- **Retry (Phase 8)**: `--retry` lists the locked/denied moves of the
+  newest journaled run and re-checks each file's fingerprint; `--retry
+  --apply` re-attempts exactly the files whose recorded location and
+  fingerprint still match, as a fresh journaled run (the original journal
+  is never rewritten). Moved, permanent, identity-changed, and generic `Failed`
+  outcomes are never retried. A blocked or busy journal exits `2`; if nothing
+  is retryable the run exits `0` with a disclosure; a retry that finishes with
+  any failures exits `3`. With `--retry --apply`, a full recursive re-scan
+  fails closed on any inaccessible subdirectory (exit `3`).
 - Exit codes: `0` dry-run report printed / all moves completed · `1` usage
   error · `2` safety rejection (target refused, root changed, invalid plan)
-  · `3` scan or planning failure / execution completed with failures.
+  or blocked/busy journal · `3` scan or planning failure, operational journal
+  storage I/O failure, or execution completed with failures.
 - Directory arguments are received through the UTF-16 entry point and
   converted with strict UTF-16→UTF-8 conversion: non-ASCII paths (Unicode
   folder names) round-trip exactly. Console output is UTF-8.

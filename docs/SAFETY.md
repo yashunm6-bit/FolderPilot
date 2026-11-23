@@ -1,22 +1,26 @@
 # FolderPilot — Safety Invariants
 
-> **STATUS: PARTIALLY IMPLEMENTED — planning, dry-run preview and the safe executor (Phases 3–5).**
+> **STATUS: IMPLEMENTED through Phase 8 — planning, dry-run, safe executor, journaled undo, recursive organization, and retry.**
 >
 > FolderPilot 0.1.0 can validate a target, scan it, inspect destination
 > categories, resolve collisions, print a read-only dry-run report, and —
 > with explicit `--apply` — revalidate everything and move files through
 > validated handles with OS-enforced no-overwrite semantics (Phase 5).
+> Phase 7 adds journaled execution and undo (`--undo` preview /
+> `--undo --apply` restore); Phase 8 adds opt-in recursive organization
+> (`--recursive`) and retry (`--retry [--apply]`).
 > OS NOTE (disclosed): the Win32 class-3 form of the RootDirectory-relative
 > rename (`SetFileInformationByHandle(FileRenameInfo)`) fails with
 > ERROR_INVALID_PARAMETER (87) on OS build 26300 — a build-specific
 > observation, not a universal Windows guarantee. Movement therefore uses
 > the native `NtSetInformationFile` (`FileRenameInformation`, class 10)
 > anchored rename, which successfully performed the required movement on
-> this build and passed the complete Debug and Release suites (144/144
-> cases, 1,762/1,762 assertions, 0 failed, 0 skipped in each — local
-> runtime verification; hosted CI has not run).
-> There is still no deletion, no overwrite, no undo, and no recursive
-> organization.
+> this build. The complete Debug and Release suites pass locally: 279/279
+> cases and 14,893/14,893 assertions per configuration, with 0 failed,
+> 0 skipped, and 0 warnings. Hosted CI has verified Phases 1–7.1c (see
+> README); there is no hosted Phase 8 claim yet.
+> There is still no deletion and no overwrite. Undo restores locations only —
+> never file contents.
 >
 > This document records the architectural safety requirements ratified in
 > Engineering Plan v2.5. Each invariant below carries its own status marker;
@@ -37,7 +41,8 @@ including that missing category directories are not created. Without
 **IMPLEMENTED (Phase 5)**
 Files move only when the user explicitly passes `--apply`. The executor
 consumes exactly the immutable plan it was given — it never invents
-destination names, never re-plans, never retries. Without `--apply` the
+destination names, never re-plans, never retries internally (retry is an
+explicit, separate `--retry` invocation, §20). Without `--apply` the
 default dry-run prints the plan and changes nothing.
 
 ## 3. No file deletion in the product
@@ -58,10 +63,14 @@ used. There is no path-based rename fallback.
 A conflicting move fails as `Conflict`: the source remains untouched and the
 destination content remains unchanged; other independent moves continue.
 
-## 5. No recursive scanning in the MVP
-**IMPLEMENTED (Phase 3)**
-Enumeration covers only the immediate children of the validated root.
-Subdirectories are never entered, moved, or modified.
+## 5. No recursive scanning by default (MVP default)
+**IMPLEMENTED (Phase 3; Phase 8 adds opt-in `--recursive`)**
+By default enumeration covers only the immediate children of the validated
+root; without `--recursive`, subdirectories are never entered, moved, or
+modified. Phase 8 adds opt-in `--recursive` fail-closed depth-first traversal
+(§19): subdirectories are entered only under the structural and
+reparse/hidden/system gates, and any enumeration failure fails the whole scan
+closed.
 
 ## 6. Reparse-point protection
 **IMPLEMENTED (Phases 3–5: leaf and target gates in validation/scanning, destination-category gates in planning/execution)**
@@ -112,7 +121,7 @@ test-fixture helper after canonical-path verification. Tests never target
 the real Downloads folder, any user data, or `%TEMP%`.
 
 ## 12. Fail-closed behavior
-**IMPLEMENTED (Phases 3–5)**
+**IMPLEMENTED (Phases 3–5; extended through Phase 8)**
 Validation, scanning, planning, and per-move execution all fail closed: a
 root identity mismatch aborts the batch before any mutation; a category
 replacement is never adopted; a moved-onto destination is rejected by the
@@ -125,8 +134,9 @@ successful empty result. One failing entry or category never aborts
 independent work.
 Exit codes (per `app/main.cpp`): 0 dry-run report printed / execution
 completed with all moves done · 1 usage error · 2 safety rejection (target
-refused, root changed, invalid plan) · 3 scan or planning failed /
-execution completed with failures.
+refused, root changed, invalid plan) · 3 operational failure — journal
+storage I/O, scan or planning failure (including a fail-closed recursive
+scan), or execution completed with failures.
 
 ---
 
@@ -171,6 +181,28 @@ tree, never scanned by FolderPilot, never deleted or rewritten (append-only).
 A coordinated rollback of the journal and anchor to a mutually consistent
 older prefix is undetectable; resurrected candidates fail safe on revalidation
 and the limitation is disclosed rather than hidden (§13 confounders, §15 R25).
+
+## 19. Recursive traversal never escapes or duplicates (Phase 8)
+**IMPLEMENTED (Phase 8)**
+`--recursive` traverses only genuine non-reparse, non-hidden, non-system
+directories, reached step-by-step through parent handles from the retained
+root (structural containment, never path strings). Reparse points at any
+depth are skipped without being opened — a junction can neither move a file
+outside the root nor cause duplicate traversal. Category destinations are
+never traversed as sources. Depth (64) and entry (50,000) caps and
+enumeration failures fail the whole scan closed; no incomplete plan is ever
+executed.
+
+## 20. A retry never moves a file whose fingerprint changed (Phase 8)
+**IMPLEMENTED (Phase 8)**
+`--retry` executes only Locked/AccessDenied outcomes whose fresh preflight
+re-opens the source at its recorded location AND matches the recorded
+fingerprint (identity digest AND creation time). Everything else — moved,
+permanent, identity, or generic failures — is never retried. A blocked or
+corrupt newest journal refuses the retry entirely. `--retry --apply` builds
+its candidate set from a full recursive scan of the root and fails closed if
+any subdirectory cannot be enumerated (PHASE8-DESIGN §1.4). Every retry apply
+is a fresh fully-journaled run; the original journal is never rewritten.
 
 ---
 

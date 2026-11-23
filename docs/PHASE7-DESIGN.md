@@ -33,15 +33,21 @@ documentation.
 Also excluded: selective/partial undo (whole-last-run only), chained multi-run undo,
 moving/organizing directories, config-driven rules, UNC/network roots (already rejected
 by PathGuard), external checkpoint subsystems (G10).
+*(Phase 7 scope history: recursive organization and retry were subsequently delivered in
+Phase 8 — see PHASE8-DESIGN §1.)*
 
 **Preserved principles [SETTLED]:** dry-run/preview by default in both modes · explicit
 `--apply` before any mutation · never overwrite (`ReplaceIfExists = FALSE` in both
-directions) · fail-closed on every ambiguity · non-recursive scanning ·
+directions) · fail-closed on every ambiguity · non-recursive scanning (recursive scanning
+was later added additively in Phase 8; non-recursive remains the default — see
+PHASE8-DESIGN §1.1) ·
 `plan → validate → execute` flow unchanged · Win32 only inside `platform/` · synthetic
 test fixtures only · no automatic journal deletion or rewriting · Smart App Control stays
 ON; verification through hosted CI.
 
 ## 2. CLI grammar (exact)
+
+Phase 7 grammar; extended in Phase 8 (PHASE8-DESIGN §1.1/§1.4):
 
 ```
 folderpilot <root>                                     forward dry-run (default; mutation-free)
@@ -49,12 +55,18 @@ folderpilot <root> --apply                             forward execute (journal 
 folderpilot <root> --undo                              undo preview (default; mutation-free)
 folderpilot <root> --undo --apply                      undo execute (attempt segment written)
 folderpilot <root> --apply --acknowledge-undo-window   forward execute, durably superseding a resolved live undo window
+folderpilot <root> --recursive                         forward recursive dry-run (Phase 8; mutation-free)
+folderpilot <root> --recursive --apply                 forward recursive execute (Phase 8; journaled)
+folderpilot <root> --retry                             retry preview (Phase 8; mutation-free)
+folderpilot <root> --retry --apply                     retry execute (Phase 8; fresh journaled run)
 folderpilot --help | --version
 ```
 
 Mode (`--undo`) and authorization (`--apply`) are **orthogonal** — they are not mutually
-exclusive. `--acknowledge-undo-window`: valid **only** with forward `--apply` (with
-`--undo` or without `--apply` ⇒ usage error, exit 1); never bypasses blocked/unresolved
+exclusive. `--acknowledge-undo-window`: valid **only** with a forward execution — `--apply`
+or `--retry --apply` (Phase 8 amendment, PHASE8-DESIGN §1.4); with `--undo`, with
+`--recursive`, or in a read-only preview (including `--retry` alone) ⇒ usage error, exit 1;
+never bypasses blocked/unresolved
 chains, torn/ambiguous states, integrity failures, or the mutation lock (exit 2
 regardless); never authorizes overwriting; requires the acknowledgement to be journaled,
 flushed and anchored before the first mutation; produces the `SUPERSEDED UNDO
@@ -277,8 +289,9 @@ passes, ever [G6].**
 
 ## 8. Durable acknowledgement protocol
 
-RUN-START carries `undo_window_acknowledged` + `supersedes_root_run_seq` **only** when
-forward `--apply` passed a live undo window via `--acknowledge-undo-window`; RUN-START is
+RUN-START carries `undo_window_acknowledged` + `supersedes_root_run_seq` **only** when a
+forward execution (`--apply` or `--retry --apply`) passed a live undo window via
+`--acknowledge-undo-window`; RUN-START is
 **flushed and anchored before the first INTENT is permitted**. Parser invariants:
 `acknowledged:true` ⇒ `supersedes_root_run_seq` present and resolvable to a parseable
 earlier forward journal; `acknowledged:false` ⇒ field absent; a fresh `acknowledged:false`
@@ -520,7 +533,8 @@ may be longer than the surviving files show".
 **Phase 7 COMPLETE (2026-11-19): the ratified Move Journal & Undo contract
 (§1–§19) is implemented, locally runtime-verified and hosted-verified through
 `f237f70`. Deferred to Phase 8 by the ratified scope: recursive organization
-and retry handling. Deferred permanently by design: selective/partial undo,
+and retry handling (both subsequently delivered — see PHASE8-DESIGN §1).
+Deferred permanently by design: selective/partial undo,
 chained multi-run undo, external checkpoint subsystems, `--recover`.**
 | 7.5 | Full local runtime verification (authorized SAC-off window) | Report |
 | 7.6 | Hosted CI evidence + closeout | Acceptance |
@@ -530,7 +544,9 @@ guarantee "never invents destination names, never re-plans, never retries, never
 never rolls back" is amended to: within a single operation the executor still never
 retries or rolls back on its own; **undo is a separate, explicitly user-invoked mode**
 (`--undo --apply`) that performs fully revalidated reverse moves; the journal records
-outcomes but is never trusted without revalidation. Also: `docs/ARCHITECTURE.md` (§1 row,
+outcomes but is never trusted without revalidation. *(This "never retries" guarantee is
+about intra-operation behavior only; the separate user-invoked `--retry` mode was added in
+Phase 8 — see PHASE8-DESIGN §1.4.)* Also: `docs/ARCHITECTURE.md` (§1 row,
 new §12 Phase 7 notes), `docs/SAFETY.md` (invariants 13–18: journal-is-data-never-trusted;
 undo dry-run default; no-overwrite both directions; write-ahead durability; journal
 outside the organized tree; plus R25 disclosure), `README.md` (undo usage).
@@ -752,6 +768,8 @@ Safety refusals (blocked chains, ambiguous state, unrecognized storage) ⇒
 exit 2. **CLI usage errors remain exit 1 per §2/T-01…04** (unknown option,
 missing/duplicate root, malformed combinations). Operational failures
 (capacity exhaustion — exit 3 explicitly ratified in §20.5 — storage I/O,
+storage-read refusal (`JournalSessionFailure::StorageRead`, which also maps to exit 3
+in the forward-apply path per the Phase 8 amendment, PHASE8-DESIGN §4),
 journal-write stops after a successful start) ⇒ exit 3. Previews and
 successful runs ⇒ 0.
 

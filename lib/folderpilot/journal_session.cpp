@@ -138,8 +138,13 @@ bool read_storage_leaf_bytes(const StorageRoot& storage, const std::string& name
     }
     char buffer[8192];
     DWORD read = 0;
-    while (::ReadFile(leaf.handle.get(), buffer, sizeof(buffer), &read, nullptr) &&
-           read > 0) {
+    for (;;) {
+        if (!::ReadFile(leaf.handle.get(), buffer, sizeof(buffer), &read, nullptr)) {
+            return false; // a failed read is NEVER a silent truncation
+        }
+        if (read == 0) {
+            break;
+        }
         out.append(buffer, static_cast<std::size_t>(read));
     }
     return true;
@@ -147,12 +152,231 @@ bool read_storage_leaf_bytes(const StorageRoot& storage, const std::string& name
 
 } // namespace
 
+// The shared read-only storage classification (journal_session.hpp contract):
+// §20.1/§20.2 entry conventions, §4.1 newest-chain gate, §8/§9.1 live-window
+// fold. Enforced IDENTICALLY for the apply session (under its lock) and the
+// Phase 8 retry preview (under the lock it acquires for this read).
+StorageChainView classify_storage_and_newest_chain(const StorageRoot& root) {
+    StorageChainView view;
+    unsigned long long max_seq = 0;
+    bool unrecognized = false;
+    std::string unrecognized_name;
+    const auto enumerated = platform::enumerate_immediate_children(
+        root.root_key_dir.get(), 64 * 1024,
+        [&](const platform::RawDirEntry& entry) {
+            if (entry.name == L"." || entry.name == L"..") {
+                return; // quota parity: prefix records are not storage entries
+            }
+            view.saw_any = true;
+            // Attribute gates (§20.1: entries that cannot be safely
+            // classified refuse - a recognized name on a directory, reparse
+            // point or hidden/system entry is an unexpected state).
+            if ((entry.attributes &
+                 (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                  FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0) {
+                unrecognized = true;
+                if (unrecognized_name.empty()) {
+                    unrecognized_name = std::string(entry.name.begin(), entry.name.end());
+                }
+                return;
+            }
+            const auto classified = classify_storage_name(entry.name);
+            if (!classified) {
+                if (unrecognized_name.empty()) {
+                    unrecognized_name = std::string(entry.name.begin(), entry.name.end());
+                }
+                unrecognized = true;
+                return;
+            }
+            if (classified->kind == StorageEntryKind::Journal) {
+                view.journal_seqs.push_back(classified->r);
+                if (classified->r > max_seq) {
+                    max_seq = classified->r;
+                }
+            } else if (classified->kind == StorageEntryKind::Undo) {
+                view.undo_seqs.push_back(classified->r);
+                if (classified->r > max_seq) {
+                    max_seq = classified->r;
+                }
+            } else if (classified->kind == StorageEntryKind::Anchor) {
+                view.anchor_seqs.push_back(classified->r);
+            }
+        });
+    if (!enumerated.ok) {
+        view.failure = JournalSessionFailure::StorageClassification;
+        view.error = "storage directory enumeration failed: " + enumerated.error;
+        view.native_code = enumerated.native_code;
+        return view;
+    }
+    if (unrecognized) {
+        view.failure = JournalSessionFailure::StorageClassification;
+        view.error = "unrecognized storage entry under <root-key>: " + unrecognized_name +
+                     "; the storage state cannot be classified safely";
+        return view;
+    }
+    // Journal/anchor mismatch: an anchor whose journal is absent is a state
+    // the protocol never produces (the journal is always created first) -
+    // refuse rather than choose (ADDENDUM §2).
+    for (const unsigned long long a : view.anchor_seqs) {
+        bool has_journal = false;
+        for (const unsigned long long j : view.journal_seqs) {
+            if (j == a) {
+                has_journal = true;
+                break;
+            }
+        }
+        if (!has_journal) {
+            view.failure = JournalSessionFailure::StorageClassification;
+            view.error = "orphan anchor without its journal (seq " +
+                         std::to_string(a) + "); the storage state is ambiguous";
+            return view;
+        }
+    }
+    // Orphan undo segment (F6): an undo-<R>-<A> whose journal-<R> is absent
+    // is a state the protocol never produces - refuse rather than classify.
+    for (const unsigned long long u : view.undo_seqs) {
+        bool has_journal = false;
+        for (const unsigned long long j : view.journal_seqs) {
+            if (j == u) {
+                has_journal = true;
+                break;
+            }
+        }
+        if (!has_journal) {
+            view.failure = JournalSessionFailure::StorageClassification;
+            view.error = "orphan undo segment without its journal (seq " +
+                         std::to_string(u) + "); the storage state is ambiguous";
+            return view;
+        }
+    }
+    if (max_seq == kMaxStorageSequence) {
+        view.failure = JournalSessionFailure::SequenceOverflow;
+        view.error = "the 20-digit root_run_seq space is exhausted; no new runs "
+                     "can be allocated for this root";
+        return view;
+    }
+    view.newest_seq = max_seq;
+    if (!view.saw_any || max_seq == 0) {
+        view.ok = true; // empty storage: nothing to classify
+        return view;
+    }
+
+    // Newest-chain forward gate (§9.5, F4): the newest journal + its anchor
+    // are parsed and classified; a corrupt/blocked/ambiguous chain refuses
+    // new mutation (flag-immune, R6).
+    char newest_journal[64] = {};
+    char newest_anchor[64] = {};
+    std::snprintf(newest_journal, sizeof(newest_journal), "journal-%020llu.jsonl",
+                  static_cast<unsigned long long>(max_seq));
+    std::snprintf(newest_anchor, sizeof(newest_anchor), "anchor-%020llu.jsonl",
+                  static_cast<unsigned long long>(max_seq));
+    std::string journal_bytes;
+    bool journal_missing = false;
+    std::string anchor_bytes;
+    bool anchor_missing = false;
+    if (!read_storage_leaf_bytes(root, newest_journal, journal_bytes,
+                                 journal_missing) ||
+        !read_storage_leaf_bytes(root, newest_anchor, anchor_bytes,
+                                 anchor_missing)) {
+        view.failure = JournalSessionFailure::StorageRead;
+        view.error = "the newest journal or anchor could not be read";
+        return view;
+    }
+    if (journal_missing) {
+        view.failure = JournalSessionFailure::StorageClassification;
+        view.error = "the newest recognized sequence has no journal file";
+        return view;
+    }
+    const std::vector<unsigned char> journal_image(journal_bytes.begin(),
+                                                   journal_bytes.end());
+    auto parsed = parse_journal_file(journal_image, root.root_key);
+    if (!parsed.valid) {
+        view.failure = JournalSessionFailure::StorageClassification;
+        view.error = "the newest journal failed ratified parsing: " +
+                     parsed.failure.detail;
+        return view;
+    }
+    if (!anchor_missing && !anchor_bytes.empty()) {
+        const std::vector<unsigned char> anchor_image(anchor_bytes.begin(),
+                                                      anchor_bytes.end());
+        auto pa = parse_anchor_file(anchor_image);
+        if (!pa.valid) {
+            view.failure = JournalSessionFailure::StorageClassification;
+            view.error = "the newest anchor failed ratified parsing";
+            return view;
+        }
+        view.newest_anchor = std::move(pa);
+    }
+    auto journal_leaf = open_journal_leaf_read(root, newest_journal);
+    auto anchor_leaf = open_journal_leaf_read(root, newest_anchor);
+    ChainIdentityInputs ids;
+    if (journal_leaf.ok) {
+        ids.expected_journal_id = journal_leaf.id_hex;
+    }
+    if (anchor_leaf.ok) {
+        ids.expected_anchor_id = anchor_leaf.id_hex;
+    }
+    const auto classification = classify_forward_chain(
+        parsed, view.newest_anchor ? &*view.newest_anchor : nullptr, ids);
+    if (classification.state == ForwardChainState::Blocked) {
+        view.failure = JournalSessionFailure::StorageClassification;
+        view.error = "the newest forward chain is blocked: " + classification.detail;
+        return view;
+    }
+
+    // Live undo window (§8/§9.1): Moved results minus restored moves.
+    unsigned long long moved_count = 0;
+    std::vector<unsigned long long> restored;
+    for (const JournalRecord& rec : parsed.records) {
+        if (const auto* r = std::get_if<JournalResult>(&rec)) {
+            if (r->outcome == JournalOutcome::Moved) {
+                ++moved_count;
+            }
+        }
+    }
+    for (const unsigned long long a : view.undo_seqs) {
+        if (a != max_seq) {
+            continue; // only segments of the newest forward run gate here
+        }
+        char seg[64] = {};
+        std::snprintf(seg, sizeof(seg), "undo-%020llu-%020llu.jsonl",
+                      static_cast<unsigned long long>(max_seq),
+                      static_cast<unsigned long long>(a));
+        std::string seg_bytes;
+        bool seg_missing = false;
+        if (!read_storage_leaf_bytes(root, seg, seg_bytes, seg_missing)) {
+            view.failure = JournalSessionFailure::StorageRead;
+            view.error = "an attempt segment of the newest run could not be read";
+            return view;
+        }
+        if (seg_missing) {
+            continue;
+        }
+        const std::vector<unsigned char> seg_image(seg_bytes.begin(),
+                                                   seg_bytes.end());
+        const auto seg_parsed = parse_journal_file(seg_image, root.root_key);
+        if (seg_parsed.valid) {
+            for (const JournalRecord& rec : seg_parsed.records) {
+                if (const auto* r = std::get_if<JournalUndoResult>(&rec)) {
+                    if (r->outcome == JournalOutcome::Restored) {
+                        restored.push_back(r->undo_of_move);
+                    }
+                }
+            }
+        }
+    }
+    view.live_undo_window = moved_count > restored.size();
+    view.window_root_run_seq = max_seq; // the live window's forward run
+    view.newest_journal = std::move(parsed);
+    view.ok = true;
+    return view;
+}
+
 JournalSessionOpenResult JournalSession::open_for_run(
     std::string_view storage_base_path,
     const platform::RootDirectory& organized_root,
     unsigned long long planned_move_count,
     bool undo_window_acknowledged,
-    unsigned long long supersedes_root_run_seq,
     const JournalSessionFaults& faults) {
     JournalSessionOpenResult out;
 
@@ -182,219 +406,16 @@ JournalSessionOpenResult JournalSession::open_for_run(
         return out;
     }
 
-    // 3. Classify the storage directory and allocate the next sequence.
-    unsigned long long max_seq = 0;
-    bool saw_any = false;
-    bool unrecognized = false;
-    std::string unrecognized_name;
-    std::vector<unsigned long long> journal_seqs;
-    std::vector<unsigned long long> anchor_seqs;
-    std::vector<unsigned long long> undo_seqs;
-    const auto enumerated = platform::enumerate_immediate_children(
-        root.root_key_dir.get(), 64 * 1024,
-        [&](const platform::RawDirEntry& entry) {
-            if (entry.name == L"." || entry.name == L"..") {
-                return; // quota parity: prefix records are not storage entries
-            }
-            saw_any = true;
-            // Attribute gates (§20.1: entries that cannot be safely
-            // classified refuse - a recognized name on a directory, reparse
-            // point or hidden/system entry is an unexpected state).
-            if ((entry.attributes &
-                 (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
-                  FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0) {
-                unrecognized = true;
-                if (unrecognized_name.empty()) {
-                    unrecognized_name = std::string(entry.name.begin(), entry.name.end());
-                }
-                return;
-            }
-            const auto classified = classify_storage_name(entry.name);
-            if (!classified) {
-                if (unrecognized_name.empty()) {
-                    unrecognized_name = std::string(entry.name.begin(), entry.name.end());
-                }
-                unrecognized = true;
-                return;
-            }
-            if (classified->kind == StorageEntryKind::Journal) {
-                journal_seqs.push_back(classified->r);
-                if (classified->r > max_seq) {
-                    max_seq = classified->r;
-                }
-            } else if (classified->kind == StorageEntryKind::Undo) {
-                undo_seqs.push_back(classified->r);
-                if (classified->r > max_seq) {
-                    max_seq = classified->r;
-                }
-            } else if (classified->kind == StorageEntryKind::Anchor) {
-                anchor_seqs.push_back(classified->r);
-            }
-        });
-    if (!enumerated.ok) {
-        out.failure = JournalSessionFailure::StorageClassification;
-        out.error = "storage directory enumeration failed: " + enumerated.error;
-        out.native_code = enumerated.native_code;
+    // 3. Classify the storage directory and allocate the next sequence
+    // (the shared read-only classification; the mutation lock is held).
+    const StorageChainView chain = classify_storage_and_newest_chain(root);
+    if (!chain.ok) {
+        out.failure = chain.failure;
+        out.error = chain.error;
+        out.native_code = chain.native_code;
         return out;
     }
-    if (unrecognized) {
-        out.failure = JournalSessionFailure::StorageClassification;
-        out.error = "unrecognized storage entry under <root-key>: " + unrecognized_name +
-                    "; the storage state cannot be classified safely";
-        return out;
-    }
-    // Journal/anchor mismatch: an anchor whose journal is absent is a state
-    // the protocol never produces (the journal is always created first) -
-    // refuse rather than choose (ADDENDUM §2).
-    for (const unsigned long long a : anchor_seqs) {
-        bool has_journal = false;
-        for (const unsigned long long j : journal_seqs) {
-            if (j == a) {
-                has_journal = true;
-                break;
-            }
-        }
-        if (!has_journal) {
-            out.failure = JournalSessionFailure::StorageClassification;
-            out.error = "orphan anchor without its journal (seq " +
-                        std::to_string(a) + "); the storage state is ambiguous";
-            return out;
-        }
-    }
-    // Orphan undo segment (F6): an undo-<R>-<A> whose journal-<R> is absent
-    // is a state the protocol never produces - refuse rather than classify.
-    for (const unsigned long long u : undo_seqs) {
-        bool has_journal = false;
-        for (const unsigned long long j : journal_seqs) {
-            if (j == u) {
-                has_journal = true;
-                break;
-            }
-        }
-        if (!has_journal) {
-            out.failure = JournalSessionFailure::StorageClassification;
-            out.error = "orphan undo segment without its journal (seq " +
-                        std::to_string(u) + "); the storage state is ambiguous";
-            return out;
-        }
-    }
-    if (max_seq == kMaxStorageSequence) {
-        out.failure = JournalSessionFailure::SequenceOverflow;
-        out.error = "the 20-digit root_run_seq space is exhausted; no new runs "
-                    "can be allocated for this root";
-        return out;
-    }
-
-    // 3b. Newest-chain forward gate (§9.5, F4): the newest journal + its
-    // anchor are parsed and classified; a corrupt/blocked/ambiguous chain
-    // refuses new mutation (flag-immune, R6), a live undo window requires
-    // the ratified acknowledgement, and inert/abandoned chains proceed with
-    // disclosure.
-    bool live_undo_window = false;
-    if (saw_any && max_seq > 0) {
-        char newest_journal[64] = {};
-        char newest_anchor[64] = {};
-        std::snprintf(newest_journal, sizeof(newest_journal), "journal-%020llu.jsonl",
-                      static_cast<unsigned long long>(max_seq));
-        std::snprintf(newest_anchor, sizeof(newest_anchor), "anchor-%020llu.jsonl",
-                      static_cast<unsigned long long>(max_seq));
-        std::string journal_bytes;
-        bool journal_missing = false;
-        std::string anchor_bytes;
-        bool anchor_missing = false;
-        if (!read_storage_leaf_bytes(root, newest_journal, journal_bytes,
-                                     journal_missing) ||
-            !read_storage_leaf_bytes(root, newest_anchor, anchor_bytes,
-                                     anchor_missing)) {
-            out.failure = JournalSessionFailure::StorageClassification;
-            out.error = "the newest journal or anchor could not be read";
-            return out;
-        }
-        if (journal_missing) {
-            out.failure = JournalSessionFailure::StorageClassification;
-            out.error = "the newest recognized sequence has no journal file";
-            return out;
-        }
-        const std::vector<unsigned char> journal_image(journal_bytes.begin(),
-                                                       journal_bytes.end());
-        const auto parsed = parse_journal_file(journal_image, root.root_key);
-        std::optional<ParsedAnchorFile> anchor_parsed;
-        if (!anchor_missing && !anchor_bytes.empty()) {
-            const std::vector<unsigned char> anchor_image(anchor_bytes.begin(),
-                                                          anchor_bytes.end());
-            auto pa = parse_anchor_file(anchor_image);
-            if (!pa.valid) {
-                out.failure = JournalSessionFailure::StorageClassification;
-                out.error = "the newest anchor failed ratified parsing";
-                return out;
-            }
-            anchor_parsed = std::move(pa);
-        }
-        if (!parsed.valid) {
-            out.failure = JournalSessionFailure::StorageClassification;
-            out.error = "the newest journal failed ratified parsing: " +
-                        parsed.failure.detail;
-            return out;
-        }
-        auto journal_leaf = open_journal_leaf_read(root, newest_journal);
-        auto anchor_leaf = open_journal_leaf_read(root, newest_anchor);
-        ChainIdentityInputs ids;
-        if (journal_leaf.ok) {
-            ids.expected_journal_id = journal_leaf.id_hex;
-        }
-        if (anchor_leaf.ok) {
-            ids.expected_anchor_id = anchor_leaf.id_hex;
-        }
-        const auto classification = classify_forward_chain(
-            parsed, anchor_parsed ? &*anchor_parsed : nullptr, ids);
-        if (classification.state == ForwardChainState::Blocked) {
-            out.failure = JournalSessionFailure::StorageClassification;
-            out.error = "the newest forward chain is blocked: " + classification.detail;
-            return out;
-        }
-        // Live undo window (§8/§9.1): Moved results minus restored moves.
-        unsigned long long moved_count = 0;
-        std::vector<unsigned long long> restored;
-        for (const JournalRecord& rec : parsed.records) {
-            if (const auto* r = std::get_if<JournalResult>(&rec)) {
-                if (r->outcome == JournalOutcome::Moved) {
-                    ++moved_count;
-                }
-            }
-        }
-        for (const unsigned long long a : undo_seqs) {
-            if (a != max_seq) {
-                continue; // only segments of the newest forward run gate here
-            }
-            char seg[64] = {};
-            std::snprintf(seg, sizeof(seg), "undo-%020llu-%020llu.jsonl",
-                          static_cast<unsigned long long>(max_seq),
-                          static_cast<unsigned long long>(a));
-            std::string seg_bytes;
-            bool seg_missing = false;
-            if (!read_storage_leaf_bytes(root, seg, seg_bytes, seg_missing)) {
-                out.failure = JournalSessionFailure::StorageClassification;
-                out.error = "an attempt segment of the newest run could not be read";
-                return out;
-            }
-            if (seg_missing) {
-                continue;
-            }
-            const std::vector<unsigned char> seg_image(seg_bytes.begin(),
-                                                       seg_bytes.end());
-            const auto seg_parsed = parse_journal_file(seg_image, root.root_key);
-            if (seg_parsed.valid) {
-                for (const JournalRecord& rec : seg_parsed.records) {
-                    if (const auto* r = std::get_if<JournalUndoResult>(&rec)) {
-                        if (r->outcome == JournalOutcome::Restored) {
-                            restored.push_back(r->undo_of_move);
-                        }
-                    }
-                }
-            }
-        }
-        live_undo_window = moved_count > restored.size();
-    }
+    const bool live_undo_window = chain.live_undo_window;
     if (live_undo_window && !undo_window_acknowledged) {
         out.failure = JournalSessionFailure::StorageClassification;
         out.error = "a live undo window exists for the newest run; forward "
@@ -405,7 +426,8 @@ JournalSessionOpenResult JournalSession::open_for_run(
     // superseded (§8): an acknowledgement without a live window proceeds
     // without the pair (the CLI surfaces the usage semantics at 7.4).
     const bool record_ack_pair = undo_window_acknowledged && live_undo_window;
-    const unsigned long long next_seq = saw_any || !journal_seqs.empty() ? max_seq + 1 : 1ULL;
+    const unsigned long long next_seq =
+        chain.saw_any || !chain.journal_seqs.empty() ? chain.newest_seq + 1 : 1ULL;
 
     // 4. Names (20-digit zero-padded: lexicographic == numeric).
     char journal_name[64] = {};
@@ -428,7 +450,7 @@ JournalSessionOpenResult JournalSession::open_for_run(
         reserve_start.root_path = organized_root.resolved_path_utf8;
         if (record_ack_pair) {
             reserve_start.undo_window_acknowledged = true;
-            reserve_start.supersedes_root_run_seq = supersedes_root_run_seq;
+            reserve_start.supersedes_root_run_seq = chain.window_root_run_seq;
             reserve_start.has_ack = true;
         }
         const auto fwd = forward_reserve_bytes(reserve_start, planned_move_count);
@@ -517,7 +539,7 @@ JournalSessionOpenResult JournalSession::open_for_run(
     start.root_path = organized_root.resolved_path_utf8;
     if (record_ack_pair) {
         start.undo_window_acknowledged = true;
-        start.supersedes_root_run_seq = supersedes_root_run_seq;
+        start.supersedes_root_run_seq = chain.window_root_run_seq;
         start.has_ack = true;
     }
     const auto genesis = journal_genesis_prev(session.root_id_, next_seq, session.run_);

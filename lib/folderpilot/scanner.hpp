@@ -35,6 +35,11 @@ enum class SkipReason {
     UnsafeCategory,        // destination category directory is unsafe for planning
     CategoryUninspectable, // destination category could not be inspected
     CollisionExhausted,    // no free destination name within the suffix limit
+    // Recursive-traversal reasons (Phase 8):
+    CategoryDestination,   // a root category destination directory (never a source)
+    DirectoryIdentityDuplicate, // a directory identity was already visited
+    DepthLimitExceeded,    // traversal exceeded the 64-level depth limit
+    EntryLimitExceeded,    // traversal exceeded the 50000-entry limit
 };
 
 struct ScannedFile {
@@ -83,6 +88,28 @@ struct ScanOptions {
     // Product code never sets it. Lets integration tests make an entry
     // disappear or change type between enumeration and opening.
     std::function<void(const std::string& utf8_name)> before_open;
+
+    // Phase 8 ratified traversal limits (§1.2).
+    static constexpr std::size_t kMaxRecursiveDepth = 64;
+    static constexpr unsigned long long kMaxRecursiveEntries = 50000;
+    // Traversed directories are exempt from the terminal-entry budget, so a
+    // separate fail-closed cap bounds how many directories a walk descends into.
+    static constexpr std::size_t kMaxRecursiveDirectories = 50000;
+
+    // Test seams for the fail-closed limits. Product code leaves the ratified
+    // defaults above; tests lower them to exercise whole-scan refusal without
+    // creating 50,000 fixtures.
+    std::size_t max_recursive_depth = kMaxRecursiveDepth;
+    unsigned long long max_recursive_entries = kMaxRecursiveEntries;
+    std::size_t max_recursive_directories = kMaxRecursiveDirectories;
+
+    // Phase 8: recursive traversal (depth-first, deterministic; see
+    // docs/PHASE8-DESIGN.md §1). The root's category destination directories
+    // are never traversed as sources; directories with reparse/hidden/system
+    // attributes are skipped with reasons; the identity-visited set skips
+    // duplicate directory identities; enumeration failures and the depth
+    // (64) / entry (50000) / directory (50000) limits fail the whole scan.
+    bool recursive = false;
 };
 
 // Scans the directory referenced by the retained, validated root handle.
