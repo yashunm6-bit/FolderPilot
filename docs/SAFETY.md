@@ -17,8 +17,9 @@
 > anchored rename, which successfully performed the required movement on
 > this build. The complete Debug and Release suites pass locally: 279/279
 > cases and 14,893/14,893 assertions per configuration, with 0 failed,
-> 0 skipped, and 0 warnings. Hosted CI has verified Phases 1–7.1c (see
-> README); there is no hosted Phase 8 claim yet.
+> 0 skipped, and 0 warnings. Hosted CI also verified Phase 8: run
+> `45238213410` (CI #25) succeeded at the exact feature commit with Debug and
+> Release green (see README and docs/PHASE8-COMPLETION.md).
 > There is still no deletion and no overwrite. Undo restores locations only —
 > never file contents.
 >

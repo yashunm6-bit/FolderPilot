@@ -21,8 +21,12 @@
 > byte-level — see docs/PHASE7-DESIGN.md §16). The earlier Phase 6 run
 > `43052752854` (commit 7f4a9db) succeeded at the workflow/job/CTest-step
 > level but uploaded no log artifact, so its exact hosted test counts are not
-> verifiable (docs/PHASE6-CLOSEOUT.md §3–§4). No hosted Phase 8 run has been
-> verified yet.
+> verifiable (docs/PHASE6-CLOSEOUT.md §3–§4). The Phase 8 run
+> `45238213410` (CI #25, commit `b7f4b8a25a524932d2d4081d2eb5107f415812cc`)
+> succeeded with Debug and Release Configure/Build/Test green; its artifact
+> metadata digest is verified, but the artifact bytes are not anonymously
+> downloadable, so hosted counts are not claimed. See
+> docs/PHASE8-COMPLETION.md.
 
 ---
 

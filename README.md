@@ -48,9 +48,13 @@ recorded in `docs/PHASE7-DESIGN.md` §16.
 Runtime verification of the current Phase 8 state (recursive organization +
 retry): **Local (this machine; Smart App Control off by owner decision):
 Debug and Release each 279/279 test cases, 14,893/14,893 assertions — 0
-failed, 0 skipped, 0 compiler warnings.** Hosted CI verification follows the
-push of this tree; the exact run ID and head SHA are recorded in the
-completion manifest.
+failed, 0 skipped, 0 compiler warnings.** **Hosted (GitHub Actions, run
+`45238213410`, CI #25): success**, `head_sha` verified as the exact 40-character
+feature commit `b7f4b8a25a524932d2d4081d2eb5107f415812cc`; Debug and Release
+Configure/Build/Test all green. The `folderpilot-test-logs` artifact exists
+(ID `14851240321`, metadata digest verified); its bytes are not anonymously
+downloadable (HTTP 401), so hosted doctest counts are not claimed. Evidence:
+`docs/PHASE8-COMPLETION.md`.
 Historical, superseded by the figures above — Phase 5 state (commits
 `3940886`, `d024112`): 142/142 test cases, 1,748/1,748 assertions.
 Phase 6 adds Unicode CLI argument handling, Windows hardening, packaging
