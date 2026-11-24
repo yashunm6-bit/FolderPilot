@@ -49,6 +49,7 @@ struct UndoCandidateFold {
     ForwardBlockReason reason = ForwardBlockReason::ParseInvalid;
     AckWindowStatus ack_window = AckWindowStatus::None;
     bool durability_caveat = false;
+    DurabilityCaveat caveat_kind = DurabilityCaveat::None;
     bool torn_terminal_end = false;
     std::string detail;
     // The newest attempt segment's state, when one exists.

@@ -4,6 +4,14 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <doctest.h>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +22,7 @@
 
 #include "folderpilot/storage_adapter.hpp"
 #include "native.hpp"
+#include "text.hpp"
 
 // ---------------------------------------------------------------------------
 // Cross-process lock-test child mode.
@@ -92,6 +101,41 @@ int main(int argc, char** argv) {
             return run_lock_child(argv[2], argv[3], argv[4], argv[5]);
         }
     }
+
+#ifdef FOLDERPILOT_STORAGE_SANDBOX
+    // Test isolation: every spawned CLI instance (and every directly linked
+    // test) inherits a PRIVATE storage base under the build directory. The
+    // child-mode protocol above runs BEFORE this block because it receives
+    // its own explicit storage base. The PID suffix isolates concurrent runs
+    // without deleting another process's journal; no test ever creates a
+    // root-key directory in the user's real %LOCALAPPDATA% journal storage.
+    {
+        const std::string sandbox =
+            std::string{FOLDERPILOT_STORAGE_SANDBOX} + "-" +
+            std::to_string(::GetCurrentProcessId());
+        std::error_code ec;
+        std::filesystem::create_directories(sandbox, ec);
+        if (ec) {
+            std::cerr << "STORAGE SANDBOX CREATE FAILURE: " << ec.message() << '\n';
+            return 3;
+        }
+        const auto wide = folderpilot::platform::to_utf16(sandbox);
+        // CMake emits binaryDir with forward slashes; the ratified storage
+        // base open accepts plain drive-form paths only.
+        std::wstring sandbox_path = wide.ok ? wide.value : std::wstring{};
+        for (wchar_t& c : sandbox_path) {
+            if (c == L'/') {
+                c = L'\\';
+            }
+        }
+        if (!wide.ok || sandbox_path.empty() ||
+            !::SetEnvironmentVariableW(L"FOLDERPILOT_STORAGE_BASE",
+                                       sandbox_path.c_str())) {
+            std::cerr << "STORAGE SANDBOX INJECTION FAILURE\n";
+            return 3;
+        }
+    }
+#endif
 
     doctest::Context context(argc, argv);
 

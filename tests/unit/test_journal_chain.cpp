@@ -623,6 +623,8 @@ TEST_CASE("T-38/T-40 (unit basis): states A/B/C and Closed via planned_move_coun
     const ForwardChainClassification c1 = classify(closed);
     CHECK(c1.state == ForwardChainState::Closed);
     CHECK(c1.durability_caveat);
+    // The caveat is terminal-only: INTENT and RESULT are both anchored.
+    CHECK(c1.caveat_kind == DurabilityCaveat::TerminalEndUnanchored);
     CHECK(c1.completed_moves == 1);
 
     // State A: every planned move final, END absent, fully covered.

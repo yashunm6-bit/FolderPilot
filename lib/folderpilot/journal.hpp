@@ -485,6 +485,27 @@ enum class ForwardBlockReason {
 // status cannot be proven either way.
 enum class AckWindowStatus { None, Dormant, Active, Unknown };
 
+// Evidence scope of a durability caveat. Causes can co-occur, so this is a
+// bitmask; the umbrella `durability_caveat` bool remains true whenever any
+// cause is present. This only names WHICH evidence lacks flush confirmation -
+// it never changes a ratified classification state or relaxes a disclosure.
+enum class DurabilityCaveat : unsigned {
+    None = 0u,
+    AnchorCoverageUnterminated = 1u << 0, // coverage-bearing anchor record has no LF
+    UncoveredResult            = 1u << 1, // complete RESULT beyond anchor coverage
+    TerminalEndUnanchored      = 1u << 2, // RUN-END unanchored by design (R21)
+    TerminalEndTorn            = 1u << 3, // torn terminal END (bookkeeping only)
+};
+
+constexpr DurabilityCaveat operator|(DurabilityCaveat a, DurabilityCaveat b) {
+    return static_cast<DurabilityCaveat>(static_cast<unsigned>(a) |
+                                         static_cast<unsigned>(b));
+}
+
+constexpr bool has_caveat(DurabilityCaveat mask, DurabilityCaveat flag) {
+    return (static_cast<unsigned>(mask) & static_cast<unsigned>(flag)) != 0u;
+}
+
 struct ForwardChainClassification {
     ForwardChainState state{};
     ForwardBlockReason reason{};     // meaningful when state == Blocked
@@ -497,6 +518,7 @@ struct ForwardChainClassification {
     bool torn_terminal_end = false;  // torn terminal RUN-END/UNDO-END disclosure
     bool unterminated_final_record = false;
     AckWindowStatus ack_window = AckWindowStatus::None;
+    DurabilityCaveat caveat_kind = DurabilityCaveat::None;
 };
 
 struct ChainIdentityInputs {
@@ -542,6 +564,7 @@ struct SegmentClassification {
     bool durability_caveat = false;   // segments are never anchored [G9]
     bool torn_terminal_end = false;
     bool unterminated_final_record = false;
+    DurabilityCaveat caveat_kind = DurabilityCaveat::None;
 };
 
 // Classifies a reopened undo-attempt segment (unanchored; docs 6.4/10).

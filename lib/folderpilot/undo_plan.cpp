@@ -237,6 +237,7 @@ UndoPlanResult load_undo_plan(std::string_view storage_base_path,
     out.fold.reason = classification.reason;
     out.fold.ack_window = classification.ack_window;
     out.fold.durability_caveat = classification.durability_caveat;
+    out.fold.caveat_kind = classification.caveat_kind;
     out.fold.torn_terminal_end = classification.torn_terminal_end;
     if (classification.state == ForwardChainState::Blocked) {
         out.ok = true;

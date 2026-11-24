@@ -265,6 +265,8 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
         }
         if (anchor->unterminated_final_record) {
             out.durability_caveat = true;  // coverage proven by an unterminated anchor record
+            out.caveat_kind = out.caveat_kind |
+                              DurabilityCaveat::AnchorCoverageUnterminated;
         }
     }
 
@@ -412,6 +414,7 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
                 }
                 out.torn_terminal_end = true;
                 out.durability_caveat = true;
+                out.caveat_kind = out.caveat_kind | DurabilityCaveat::TerminalEndTorn;
                 evaluate_prefix(j.records.size());
                 return out;
             }
@@ -457,6 +460,7 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
             }
             out.uncovered_result_outcome = std::get<JournalResult>(rec).outcome;
             out.durability_caveat = true;
+            out.caveat_kind = out.caveat_kind | DurabilityCaveat::UncoveredResult;
             evaluate_prefix(j.records.size());
             return out;
         }
@@ -471,6 +475,7 @@ ForwardChainClassification classify_forward_chain(const ParsedJournalFile& j,
             out.state = ForwardChainState::Closed;
             out.completed_moves = planned;
             out.durability_caveat = true;  // unanchored terminal END (docs section 7)
+            out.caveat_kind = out.caveat_kind | DurabilityCaveat::TerminalEndUnanchored;
             out.detail = "complete unanchored RUN-END; closed with durability caveat";
             out.ack_window = ack_status(head_ack, covered_intents, planned == 0);
             return out;
@@ -566,6 +571,7 @@ SegmentClassification classify_segment(const ParsedJournalFile& seg) {
                 out.completed_candidates = candidates;
                 out.torn_terminal_end = true;
                 out.durability_caveat = true;
+                out.caveat_kind = out.caveat_kind | DurabilityCaveat::TerminalEndTorn;
                 return out;
             }
             default:

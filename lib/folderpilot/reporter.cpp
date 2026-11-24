@@ -180,7 +180,25 @@ std::string render_execution_report(const OrganizationPlan& plan,
         out << "\nExecution completed with partial failures.\n";
     }
     out << "Batch execution is not transactional: each file movement is atomic,\n"
-           "partial progress is possible, and undo is not available.\n";
+           "partial progress is possible.\n";
+    if (result.journal_active) {
+        // Phase 7: every non-aborted --apply is journaled and undo is an
+        // implemented, explicitly invoked mode. The pre-Phase-7 claim that
+        // "undo is not available" was stale and contradicted a successful
+        // --undo preview. Disclose the actual path instead; eligibility is
+        // always revalidated by --undo / --undo --apply against the journal
+        // and the live filesystem (docs/PHASE7-DESIGN.md §9.3).
+        out << "This run was journaled";
+        if (result.journal_stopped) {
+            out << " but stopped on a durable-record failure: use --undo to "
+                   "inspect the classified state.\n";
+        } else {
+            out << ": use --undo to preview restorable moves,\n"
+                   "then --undo --apply to restore eligible files.\n";
+        }
+    } else {
+        out << "no journal was activated; undo is not available for this run.\n";
+    }
     return out.str();
 }
 
@@ -200,7 +218,7 @@ std::string render_undo_preview(const UndoPlanResult& plan) {
         case ForwardChainState::Closed:
             out << "  newest run: complete\n"; break;
         case ForwardChainState::CompleteUnterminated:
-            out << "  newest run: complete (journal end not flushed)\n"; break;
+            out << "  newest run: complete (terminal END absent or not provably durable)\n"; break;
         case ForwardChainState::PartialUnambiguous:
             out << "  newest run: interrupted after completed moves\n"; break;
         case ForwardChainState::DeclaredInert:
@@ -213,7 +231,37 @@ std::string render_undo_preview(const UndoPlanResult& plan) {
             return out.str();
     }
     if (plan.fold.durability_caveat) {
-        out << "  durability caveat: parts of the journal were not flush-confirmed\n";
+        // Name the evidence whose flush is unconfirmed. A Closed chain's
+        // caveat is terminal-only: every INTENT/RESULT is anchored. Never
+        // weaken this to a claim that move records were not flushed, and
+        // never assert that a flush failure actually occurred - reopening
+        // cannot prove it (docs/PHASE7-DESIGN.md §7/§10, R24).
+        const DurabilityCaveat kind = plan.fold.caveat_kind;
+        if (has_caveat(kind, DurabilityCaveat::UncoveredResult)) {
+            out << "  durability caveat: a RESULT is complete but unanchored; its "
+                   "INTENT is anchored and its recorded outcome applies, but that "
+                   "RESULT's flush is not confirmed by the surviving anchor\n";
+        }
+        if (has_caveat(kind, DurabilityCaveat::TerminalEndUnanchored)) {
+            out << "  durability caveat: the terminal RUN-END is unanchored by "
+                   "design; its flush is not confirmed by the surviving files "
+                   "(written bytes survive process death, power-loss durability "
+                   "unconfirmed) - all move records are anchored\n";
+        }
+        if (has_caveat(kind, DurabilityCaveat::TerminalEndTorn)) {
+            out << "  durability caveat: the terminal END is torn; all move records "
+                   "are anchored and the torn terminal is bookkeeping only\n";
+        }
+        if (has_caveat(kind, DurabilityCaveat::AnchorCoverageUnterminated)) {
+            out << "  durability caveat: the anchor record that proves coverage is "
+                   "complete but unterminated; its power-loss durability is "
+                   "unconfirmed\n";
+        }
+        // Defensive fallback: the umbrella bool must never lose a disclosure.
+        if (kind == DurabilityCaveat::None) {
+            out << "  durability caveat: parts of the journal were not "
+                   "flush-confirmed\n";
+        }
     }
     if (plan.fold.candidates.empty()) {
         out << "  nothing to undo\n";

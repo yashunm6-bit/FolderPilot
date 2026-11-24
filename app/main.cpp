@@ -178,7 +178,36 @@ int wmain(int argc, wchar_t* argv[]) {
         return 2;
     }
 
-    const auto storage_base = folderpilot::platform::local_app_data_path();
+    // Storage base: production uses %LOCALAPPDATA%. An explicit
+    // FOLDERPILOT_STORAGE_BASE override (wide path, converted strictly to
+    // UTF-8) redirects ALL storage operations into a pre-existing sandbox
+    // directory. This is a test/smoke injection point only: it does not
+    // create the base, weaken validation, or change any CLI grammar.
+    folderpilot::platform::KnownFolderResult storage_base;
+    const DWORD needed = ::GetEnvironmentVariableW(L"FOLDERPILOT_STORAGE_BASE",
+                                                   nullptr, 0);
+    if (needed > 0) {
+        std::wstring injected(needed, L'\0');
+        const DWORD written = ::GetEnvironmentVariableW(
+            L"FOLDERPILOT_STORAGE_BASE", injected.data(), needed);
+        if (written + 1 == needed) {
+            injected.resize(written);
+            const auto converted = folderpilot::platform::to_utf8(injected);
+            if (converted.ok && !converted.value.empty()) {
+                storage_base.ok = true;
+                storage_base.path_utf8 = converted.value;
+            } else {
+                storage_base.error =
+                    "FOLDERPILOT_STORAGE_BASE could not be converted to UTF-8";
+            }
+        } else {
+            storage_base.error = "FOLDERPILOT_STORAGE_BASE could not be read";
+        }
+    } else if (::GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+        storage_base = folderpilot::platform::local_app_data_path();
+    } else {
+        storage_base.error = "FOLDERPILOT_STORAGE_BASE could not be queried";
+    }
     if (!storage_base.ok) {
         std::cout << "Storage base unavailable: " << storage_base.error << "\n";
         return 3;

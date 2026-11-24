@@ -49,6 +49,9 @@ target_link_libraries(folderpilot_tests PRIVATE
 target_compile_definitions(folderpilot_tests PRIVATE
     FOLDERPILOT_PHASE3_SANDBOX="${CMAKE_BINARY_DIR}/phase3-test-sandbox"
     FOLDERPILOT_PHASE5_SANDBOX="${CMAKE_BINARY_DIR}/phase5-test-sandbox"
+    # Every spawned CLI/test process inherits FOLDERPILOT_STORAGE_BASE, so no
+    # test ever creates a root-key directory in the user's real %LOCALAPPDATA%.
+    FOLDERPILOT_STORAGE_SANDBOX="${CMAKE_BINARY_DIR}/storage-test-sandbox"
     FOLDERPILOT_EXE_PATH="$<TARGET_FILE:folderpilot>"
     FOLDERPILOT_TESTS_EXE_PATH="$<TARGET_FILE:folderpilot_tests>"
 )
