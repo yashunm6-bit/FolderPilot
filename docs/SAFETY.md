@@ -20,6 +20,14 @@
 > 0 skipped, and 0 warnings. Hosted CI also verified Phase 8: run
 > `45238213410` (CI #25) succeeded at the exact feature commit with Debug and
 > Release green (see README and docs/PHASE8-COMPLETION.md).
+> **Current release evidence:** commit `123fdbbcd050b5ef8fbc1d8e166f11917e3920fc`,
+> hosted CI run `45429799769` (CI #27, exact head SHA) succeeded; local Debug
+> and Release each pass 285/285 cases and 14,918/14,918 assertions. The
+> execution report no longer claims undo is unavailable for journaled runs,
+> and the durability caveat distinguishes the unanchored terminal END from
+> unconfirmed move records without changing any ratified safety invariant.
+> Test storage is injected under the build directory, never into the user's
+> real journal store.
 > There is still no deletion and no overwrite. Undo restores locations only —
 > never file contents.
 >

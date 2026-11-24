@@ -27,6 +27,14 @@
 > metadata digest is verified, but the artifact bytes are not anonymously
 > downloadable, so hosted counts are not claimed. See
 > docs/PHASE8-COMPLETION.md.
+> **Current release evidence (supersedes the counts above):** commit
+> `123fdbbcd050b5ef8fbc1d8e166f11917e3920fc`, hosted CI run `45429799769`
+> (CI #27, exact head SHA) succeeded with Debug and Release green; both
+> downloaded `LastTest.log` files and fresh local builds report 285/285 cases
+> and 14,918/14,918 assertions. A `DurabilityCaveat` bitmask now names which
+> evidence lacks flush confirmation while preserving every ratified state and
+> disclosure (docs/PHASE7-DESIGN.md §§4.1, 7, 10). Tests use an injected
+> synthetic storage base (docs/PHASE8-COMPLETION.md §5).
 
 ---
 

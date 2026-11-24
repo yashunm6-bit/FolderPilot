@@ -55,6 +55,20 @@ Configure/Build/Test all green. The `folderpilot-test-logs` artifact exists
 (ID `14851240321`, metadata digest verified); its bytes are not anonymously
 downloadable (HTTP 401), so hosted doctest counts are not claimed. Evidence:
 `docs/PHASE8-COMPLETION.md`.
+**Release-readiness correction (current):** commit
+`123fdbbcd050b5ef8fbc1d8e166f11917e3920fc`, pushed `296ce21..123fdbb`.
+The stale pre-Phase-7 "undo is not available" execution-report line is gone;
+the durability caveat now names the exact unconfirmed evidence (a structurally
+unanchored terminal RUN-END versus a genuinely unanchored RESULT) without
+weakening the ratified contract. Tests inject a synthetic storage base and no
+longer write to the user's real `%LOCALAPPDATA%`. Local Debug and Release each
+**285/285 test cases, 14,918/14,918 assertions — 0 failed, 0 skipped, 0
+warnings**. Hosted CI run `45429799769` (CI #27, exact `head_sha`) succeeded
+in both configurations; downloaded `LastTest.log` files confirm those counts.
+Portable package SHA-256:
+`3ac0dccf0950deff0159478fe00c952879e0df4a7ad9e2bc2506d880da4243b5`.
+See `docs/PHASE8-COMPLETION.md` §5.
+
 Historical, superseded by the figures above — Phase 5 state (commits
 `3940886`, `d024112`): 142/142 test cases, 1,748/1,748 assertions.
 Phase 6 adds Unicode CLI argument handling, Windows hardening, packaging
@@ -145,7 +159,11 @@ listing work on the same machine. The direct CMake forms below are
 equivalent for a fresh tree (note the explicit build types):
 `cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug`,
 `cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release`,
-then `ninja` inside the build directory and `ctest` from it.
+then `ninja` inside the build directory and `ctest` from it. Test runs inject
+a private `FOLDERPILOT_STORAGE_BASE` under `<build>/storage-test-sandbox`, so
+journals created by tests never enter the user's real `%LOCALAPPDATA%`. The
+same environment variable can be set for a packaged smoke test; production
+uses `%LOCALAPPDATA%` whenever it is unset.
 
 ## Packaging and distribution
 
